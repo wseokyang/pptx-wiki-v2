@@ -44,4 +44,4 @@ Write-Host "   Use -Runtime cpu when no supported NVIDIA GPU is available."
 Write-Host "2. Edit: $ProjectDir\config.yml"
 Write-Host '3. If using api_key_env for Wiki synthesis, set it before running, for example:'
 Write-Host '   $env:PPTX_WIKI_API_KEY = "your-key"'
-Write-Host "4. Run: .\run-windows.ps1 'C:\path\to\deck.pptx'"
+Write-Host "4. Run in the VS Code terminal: python .\run.py 'C:\path\to\deck.pptx'"

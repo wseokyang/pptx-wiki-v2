@@ -77,15 +77,23 @@ Explorer에서 BAT 파일로 실행하려면 환경변수를 Windows 사용자 �
 등록하거나, `config.yml`의 `api_key`에 직접 넣고 `api_key_env: ""`로 바꿉니다.
 후자는 평문 secret이므로 config를 공유하거나 커밋하면 안 됩니다.
 
-이후 실행 시 인수는 PPTX 하나뿐입니다.
+이후 VS Code에서 이 폴더를 열고 터미널에서 실행합니다. `run.py`가 프로젝트의
+`.venv` Python을 자동으로 찾아 실행하므로 별도로 activate하지 않아도 됩니다.
+진행 로그와 최종 결과는 같은 터미널에 계속 출력됩니다.
 
 ```powershell
-.\run-windows.ps1 "D:\documents\source.pptx"
+python .\run.py "D:\documents\source.pptx"
 ```
 
-또는 PPTX를 `run-windows.bat` 위로 drag-and-drop할 수 있습니다. 스크립트는 항상
-자신과 같은 디렉터리의 고정된 `config.yml`만 읽으며, PPTX 옆이나 현재 작업
-디렉터리의 설정 파일을 자동으로 신뢰하지 않습니다.
+기본적으로 `run.py`와 같은 디렉터리의 고정된 `config.yml`을 읽으며, PPTX 옆이나
+현재 작업 디렉터리의 설정 파일을 자동으로 신뢰하지 않습니다. 다른 설정이나 출력
+경로를 명시하려면 다음처럼 실행합니다.
+
+```powershell
+python .\run.py "D:\documents\source.pptx" `
+  --config "D:\settings\pptx-wiki.yml" `
+  --output "D:\results\source-wiki"
+```
 
 Windows 기본 설정은 다음과 같습니다.
 

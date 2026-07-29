@@ -1,5 +1,5 @@
 # pptx-wiki configuration for Windows
-# Only the PPTX path is passed to run-windows.ps1; edit this file once.
+# Only the PPTX path is required by run.py; edit this file once.
 version: 1
 
 output:

@@ -1,0 +1,66 @@
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_runner():
+    spec = importlib.util.spec_from_file_location("pptx_wiki_run_script", ROOT / "run.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_runner_uses_project_python_and_streams_to_configured_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = _load_runner()
+    source = tmp_path / "한글 자료.pptx"
+    source.write_bytes(b"pptx-placeholder")
+    config = tmp_path / "settings.yml"
+    config.write_text("version: 1\n", encoding="utf-8")
+    project_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    recorded: dict[str, object] = {}
+
+    monkeypatch.setattr(runner, "_project_python", lambda: project_python)
+
+    def fake_run(command, *, cwd, env, check):
+        recorded.update(command=command, cwd=cwd, env=env, check=check)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    assert runner.main([str(source), "--config", str(config)]) == 0
+    command = recorded["command"]
+    assert command[:5] == [
+        str(project_python),
+        "-u",
+        "-m",
+        "pptx_wiki.cli",
+        "convert",
+    ]
+    assert str(source) in command
+    assert str(config) in command
+    assert recorded["cwd"] == runner.PROJECT_ROOT
+    assert recorded["check"] is False
+    assert recorded["env"]["PYTHONUNBUFFERED"] == "1"
+
+
+def test_runner_rejects_non_pptx_input(tmp_path: Path) -> None:
+    runner = _load_runner()
+    source = tmp_path / "unsafe.pptm"
+    source.write_bytes(b"placeholder")
+    config = tmp_path / "config.yml"
+    config.write_text("version: 1\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="2"):
+        runner.main([str(source), "--config", str(config)])
