@@ -1,0 +1,9 @@
+# Runtime dependencies for the native Windows OvisOCR2 worker.
+#
+# torch and torchvision are deliberately installed by setup-windows.ps1 from
+# the selected official PyTorch CPU/CUDA wheel index.  Keeping them out of this
+# file prevents pip from silently replacing a CUDA build with a CPU build.
+huggingface-hub==1.25.1
+Pillow==12.3.0
+safetensors==0.8.0
+transformers==5.14.1

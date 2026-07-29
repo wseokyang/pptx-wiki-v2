@@ -1,0 +1,7 @@
+# Direct dependency lock for the PaddleOCR-VL 1.5 worker.
+# PaddlePaddle itself is installed by setup-windows.ps1 from the selected
+# official CPU/CUDA package index.
+paddleocr[doc-parser]==3.7.0
+paddlex[ocr,genai-client]==3.7.2
+huggingface-hub==1.25.1
+safetensors==0.8.0

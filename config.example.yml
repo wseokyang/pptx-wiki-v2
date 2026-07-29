@@ -1,0 +1,113 @@
+# pptx-wiki configuration for Windows
+# Only the PPTX path is passed to run-windows.ps1; edit this file once.
+version: 1
+
+output:
+  # Relative paths are resolved from this config.yml file.
+  directory: ./output
+  # output/<pptx filename>/... is created automatically.
+  subdirectory_per_pptx: true
+  # stem_hash avoids collisions when different folders contain the same PPTX filename.
+  naming: stem_hash
+  # Keep false to prevent accidental overwrites of an earlier result.
+  allow_existing: false
+
+render:
+  # powerpoint: use installed Microsoft PowerPoint through COM (recommended on Windows)
+  # auto: PowerPoint on Windows, otherwise LibreOffice
+  # libreoffice: use LibreOffice + pdftocairo
+  backend: powerpoint
+  # Standard 13.333-inch widescreen slides become about 4000px wide at 300 DPI.
+  dpi: 300
+  source_padding_ratio: 0.002
+  model_padding_px: 24
+  # Prevent PowerPoint from contacting linked images, OLE objects, or external data sources.
+  block_external_resources: true
+  # Set a directory here only when slides were already exported as PNG/JPG.
+  rendered_slides_dir: null
+  office_binary: null
+  pdf_binary: null
+
+extraction:
+  include_empty_shapes: false
+  strict: false
+
+# OpenAI-compatible VLM endpoint used only for rendered image/chart/SmartArt ROIs.
+vlm_api:
+  base_url: ""
+  model: ""
+  # Prefer api_key_env. A literal key is supported but this file is then a secret.
+  api_key: ""
+  api_key_env: PPTX_WIKI_API_KEY
+  timeout_seconds: 180
+  max_tokens: 8192
+
+# OpenAI-compatible text LLM endpoint used to reorganize the grounded corpus into wiki pages.
+# It may be the same server as vlm_api with a different model.
+llm_api:
+  base_url: ""
+  model: ""
+  api_key: ""
+  api_key_env: PPTX_WIKI_API_KEY
+  timeout_seconds: 180
+  max_tokens: 4096
+
+ocr:
+  enabled: true
+  # none | local_model | openai_vlm | paddle_cli | command
+  # local_then_vlm, paddle_then_vlm, command_then_vlm are optional fallbacks.
+  backend: local_model
+  strict: false
+  # Use json_object or none if the VLM server does not support JSON Schema.
+  response_format: json_schema
+  image_detail: high
+
+  # Bundled Hugging Face workers. This is a fixed profile name, not a repo ID.
+  # paddleocr_vl_16 | paddleocr_vl_15 | monkeyocr_v2_b | ovisocr2
+  local_model:
+    model: paddleocr_vl_16
+    # Each profile has its own .venv below workers_directory.
+    workers_directory: ./workers
+    # setup-windows.ps1 downloads pinned snapshots below this directory.
+    models_directory: ./models
+    # Leave null to use workers/<model>/.venv/Scripts/python.exe and worker.py.
+    python_executable: null
+    worker_script: null
+    device: auto
+    dtype: auto
+    # Initial model load can take several minutes on the first run.
+    startup_timeout_seconds: 900
+    request_timeout_seconds: 600
+    max_new_tokens: 16384
+    # When true, an OCR failure is sent to vlm_api. This may upload the crop.
+    fallback_to_vlm: false
+
+  paddle:
+    executable: paddleocr
+    pipeline_version: v1.6
+    device: null
+    engine: null
+    timeout_seconds: 300
+    extra_args: []
+
+  # Legacy/custom adapter. Bundled Hugging Face models do not use this section.
+  # Available placeholders: {image}, {output}, {task}, {language}, {request_id}
+  command:
+    argv: []
+    cwd: null
+    timeout_seconds: 300
+
+wiki:
+  enabled: true
+  language: Korean
+  max_input_chars: 36000
+  max_output_tokens: 4096
+  max_topics: 64
+  repair_attempts: 2
+  discover_topics: true
+
+network:
+  # Keep false unless the endpoint intentionally receives document crops over a network.
+  allow_remote_endpoints: false
+  # Plain HTTP is always allowed for localhost. Enable this only for a trusted LAN server.
+  allow_insecure_http: false

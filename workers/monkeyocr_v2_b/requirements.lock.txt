@@ -1,0 +1,12 @@
+# MonkeyOCRv2's official Transformers combination is torch 2.6.0,
+# torchvision 0.21.0, and transformers 4.57.6. setup-windows.ps1 installs the
+# selected CPU/CUDA torch wheel first, then installs this pinned set.
+torch==2.6.0
+torchvision==0.21.0
+transformers==4.57.6
+accelerate==1.11.0
+einops==0.8.1
+huggingface-hub==0.36.0
+Pillow==11.3.0
+safetensors==0.6.2
+tokenizers==0.22.1
