@@ -16,6 +16,7 @@ from yaml.events import AliasEvent
 
 
 RenderBackend = Literal["auto", "powerpoint", "libreoffice"]
+CoveragePolicy = Literal["selected", "complete"]
 OCRBackend = Literal[
     "none",
     "openai_vlm",
@@ -192,14 +193,21 @@ class OCRSettings:
 
 
 @dataclass(frozen=True, slots=True)
-class WikiSettings:
+class SemanticSettings:
     enabled: bool = True
+    goal: str = ""
+    coverage_policy: CoveragePolicy = "complete"
     language: str = "Korean"
     max_input_chars: int = 36_000
     max_output_tokens: int = 4_096
     max_topics: int = 64
     repair_attempts: int = 2
     discover_topics: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class WikiSettings:
+    enabled: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +225,7 @@ class AppConfig:
     vlm_api: APISettings
     llm_api: APISettings
     ocr: OCRSettings
+    semantic: SemanticSettings
     wiki: WikiSettings
     network: NetworkSettings
     warnings: tuple[str, ...] = ()
@@ -235,24 +244,23 @@ def load_config(path: str | Path) -> AppConfig:
     except yaml.YAMLError as exc:
         raise ValueError(f"invalid YAML in {source}: {exc}") from exc
     root = _mapping(value or {}, "config")
-    _check_keys(
-        root,
-        {
-            "version",
-            "output",
-            "render",
-            "extraction",
-            "vlm_api",
-            "llm_api",
-            "ocr",
-            "wiki",
-            "network",
-        },
-        "config",
-    )
     version = _integer(root.get("version", 1), "version", minimum=1)
-    if version != 1:
+    if version not in {1, 2}:
         raise ValueError(f"unsupported config version: {version}")
+    allowed_root_keys = {
+        "version",
+        "output",
+        "render",
+        "extraction",
+        "vlm_api",
+        "llm_api",
+        "ocr",
+        "wiki",
+        "network",
+    }
+    if version == 2:
+        allowed_root_keys.add("semantic")
+    _check_keys(root, allowed_root_keys, "config")
     base = source.parent
     warnings: list[str] = []
 
@@ -498,47 +506,53 @@ def load_config(path: str | Path) -> AppConfig:
     )
 
     wiki_value = _section(root, "wiki")
-    _check_keys(
-        wiki_value,
-        {
-            "enabled",
-            "language",
-            "max_input_chars",
-            "max_output_tokens",
-            "max_topics",
-            "repair_attempts",
-            "discover_topics",
-        },
-        "wiki",
-    )
-    wiki = WikiSettings(
-        enabled=_boolean(wiki_value.get("enabled", True), "wiki.enabled"),
-        language=_string(wiki_value.get("language", "Korean"), "wiki.language"),
-        max_input_chars=_integer(
-            wiki_value.get("max_input_chars", 36_000),
-            "wiki.max_input_chars",
-            minimum=2_000,
-            maximum=2_000_000,
-        ),
-        max_output_tokens=_integer(
-            wiki_value.get("max_output_tokens", 4_096),
-            "wiki.max_output_tokens",
-            minimum=256,
-            maximum=131_072,
-        ),
-        max_topics=_integer(
-            wiki_value.get("max_topics", 64), "wiki.max_topics", minimum=1, maximum=512
-        ),
-        repair_attempts=_integer(
-            wiki_value.get("repair_attempts", 2),
-            "wiki.repair_attempts",
-            minimum=0,
-            maximum=10,
-        ),
-        discover_topics=_boolean(
-            wiki_value.get("discover_topics", True), "wiki.discover_topics"
-        ),
-    )
+    if version == 1:
+        _check_keys(
+            wiki_value,
+            {
+                "enabled",
+                "language",
+                "max_input_chars",
+                "max_output_tokens",
+                "max_topics",
+                "repair_attempts",
+                "discover_topics",
+            },
+            "wiki",
+        )
+        legacy_enabled = _boolean(wiki_value.get("enabled", True), "wiki.enabled")
+        semantic = _semantic_settings(
+            wiki_value,
+            label="wiki",
+            enabled=legacy_enabled,
+        )
+        wiki = WikiSettings(enabled=legacy_enabled)
+        warnings.append(
+            "config version 1 is deprecated: wiki.enabled is mapped to both "
+            "semantic.enabled and wiki.enabled; other wiki settings are mapped to semantic"
+        )
+    else:
+        semantic_value = _section(root, "semantic")
+        _check_keys(
+            semantic_value,
+            {
+                "enabled",
+                "goal",
+                "coverage_policy",
+                "language",
+                "max_input_chars",
+                "max_output_tokens",
+                "max_topics",
+                "repair_attempts",
+                "discover_topics",
+            },
+            "semantic",
+        )
+        semantic = _semantic_settings(semantic_value, label="semantic")
+        _check_keys(wiki_value, {"enabled"}, "wiki")
+        wiki = WikiSettings(
+            enabled=_boolean(wiki_value.get("enabled", True), "wiki.enabled")
+        )
 
     network_value = _section(root, "network")
     _check_keys(
@@ -557,7 +571,7 @@ def load_config(path: str | Path) -> AppConfig:
         ),
     )
 
-    _validate_cross_section(vlm_api, llm_api, ocr, wiki, network)
+    _validate_cross_section(vlm_api, llm_api, ocr, semantic, wiki, network)
     return AppConfig(
         source_path=source,
         output=output,
@@ -566,9 +580,59 @@ def load_config(path: str | Path) -> AppConfig:
         vlm_api=vlm_api,
         llm_api=llm_api,
         ocr=ocr,
+        semantic=semantic,
         wiki=wiki,
         network=network,
         warnings=tuple(warnings),
+    )
+
+
+def _semantic_settings(
+    value: Mapping[str, Any],
+    *,
+    label: str,
+    enabled: bool | None = None,
+) -> SemanticSettings:
+    return SemanticSettings(
+        enabled=(
+            _boolean(value.get("enabled", True), f"{label}.enabled")
+            if enabled is None
+            else enabled
+        ),
+        goal=_string(value.get("goal", ""), f"{label}.goal"),
+        coverage_policy=_choice(
+            value.get("coverage_policy", "complete"),
+            {"selected", "complete"},
+            f"{label}.coverage_policy",
+        ),  # type: ignore[arg-type]
+        language=_string(value.get("language", "Korean"), f"{label}.language"),
+        max_input_chars=_integer(
+            value.get("max_input_chars", 36_000),
+            f"{label}.max_input_chars",
+            minimum=2_000,
+            maximum=2_000_000,
+        ),
+        max_output_tokens=_integer(
+            value.get("max_output_tokens", 4_096),
+            f"{label}.max_output_tokens",
+            minimum=256,
+            maximum=131_072,
+        ),
+        max_topics=_integer(
+            value.get("max_topics", 64),
+            f"{label}.max_topics",
+            minimum=1,
+            maximum=512,
+        ),
+        repair_attempts=_integer(
+            value.get("repair_attempts", 2),
+            f"{label}.repair_attempts",
+            minimum=0,
+            maximum=10,
+        ),
+        discover_topics=_boolean(
+            value.get("discover_topics", True), f"{label}.discover_topics"
+        ),
     )
 
 
@@ -608,6 +672,7 @@ def _validate_cross_section(
     vlm_api: APISettings,
     llm_api: APISettings,
     ocr: OCRSettings,
+    semantic: SemanticSettings,
     wiki: WikiSettings,
     network: NetworkSettings,
 ) -> None:
@@ -628,7 +693,9 @@ def _validate_cross_section(
     if ocr.enabled and ocr.backend in {"local_model", "local_then_vlm"}:
         if not ocr.local_model.device:
             raise ValueError("ocr.local_model.device cannot be empty")
-    if wiki.enabled:
+    if wiki.enabled and not semantic.enabled:
+        raise ValueError("wiki.enabled requires semantic.enabled in one-shot configuration")
+    if semantic.enabled:
         _require_endpoint(llm_api, "llm_api", network)
         _require_secret(llm_api, "llm_api")
 
@@ -785,6 +852,7 @@ __all__ = [
     "APISettings",
     "AppConfig",
     "CommandSettings",
+    "CoveragePolicy",
     "ExtractionSettings",
     "LocalModelName",
     "LocalModelSettings",
@@ -793,6 +861,7 @@ __all__ = [
     "OutputSettings",
     "PaddleSettings",
     "RenderSettings",
+    "SemanticSettings",
     "WikiSettings",
     "load_config",
 ]

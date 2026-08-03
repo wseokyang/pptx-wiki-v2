@@ -14,7 +14,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Convert one PPTX into a grounded LLM wiki using config.yml.",
+        description=(
+            "Parse one PPTX, optionally reorganize it semantically, and publish a "
+            "grounded Wiki using config.yml."
+        ),
     )
     parser.add_argument("input", type=Path, help="input .pptx file")
     parser.add_argument(

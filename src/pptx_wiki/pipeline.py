@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, is_dataclass
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ from .ocr import OCRAdapter, OCRBlock, OCRError, OCRRequest, OCRResult
 from .render import create_element_crops, render_pptx, render_pptx_powerpoint
 from .safety import validate_pptx_archive
 from .synthesis import ChatBackend, SynthesisConfig, WikiSynthesis, synthesize_wiki
+from .semantic import SemanticExport
 from .validate import ValidationIssue, issues_to_dicts, validate_deck
 from .wiki_output import CorpusExport, export_slide_corpus
 
@@ -39,10 +41,13 @@ class PipelineConfig:
 @dataclass(frozen=True, slots=True)
 class PipelineResult:
     output_dir: Path
+    parsed_dir: Path
+    parsed_manifest_path: Path
     deck_path: Path
     corpus: CorpusExport
     qa_path: Path
     issues: tuple[ValidationIssue, ...]
+    semantic: SemanticExport | None
     wiki: WikiSynthesis | None
     ocr_successes: int
     ocr_failures: int
@@ -58,18 +63,22 @@ def run_pipeline(
     synthesis_backend: ChatBackend | None = None,
     synthesis_config: SynthesisConfig | None = None,
 ) -> PipelineResult:
-    """Run native extraction, optional ROI OCR, corpus export and wiki synthesis."""
+    """Run parsed extraction and optionally continue through semantic and Wiki stages."""
 
     settings = config or PipelineConfig()
     source = Path(pptx_path).resolve()
     destination = Path(output_dir).resolve()
+    parsed = destination / "parsed"
     validate_pptx_archive(
         source,
         reject_external_resources=settings.block_external_resources,
     )
-    destination.mkdir(parents=True, exist_ok=True)
+    _ensure_empty_stage(parsed, "parsed")
+    _ensure_empty_stage(destination / "semantic", "semantic")
+    _ensure_empty_stage(destination / "wiki", "wiki")
+    parsed.mkdir(parents=True, exist_ok=True)
 
-    source_assets = destination / "source-assets"
+    source_assets = parsed / "source-assets"
     deck = extract_pptx(
         source,
         assets_dir=source_assets,
@@ -82,7 +91,7 @@ def run_pipeline(
     if ocr_adapter is not None or rendered_slides_dir is not None:
         rendered = _resolve_rendered_slides(
             source,
-            destination,
+            parsed,
             len(deck.slides),
             rendered_slides_dir=rendered_slides_dir,
             dpi=settings.dpi,
@@ -96,7 +105,7 @@ def run_pipeline(
         create_element_crops(
             deck,
             rendered,
-            destination / "roi",
+            parsed / "roi",
             element_kinds=OCR_KINDS,
             padding_ratio=settings.source_padding_ratio,
             model_padding_px=settings.model_padding_px,
@@ -105,15 +114,15 @@ def run_pipeline(
             ocr_successes, ocr_failures = apply_ocr(
                 deck,
                 ocr_adapter,
-                output_dir=destination / "ocr-results",
+                output_dir=parsed / "ocr-results",
                 strict=settings.strict_ocr,
             )
 
-    deck_path = destination / "deck.json"
+    deck_path = parsed / "deck.json"
     _write_json(deck_path, deck.to_dict())
-    corpus = export_slide_corpus(deck, destination / "corpus")
+    corpus = export_slide_corpus(deck, parsed / "corpus")
     issues = validate_deck(deck)
-    qa_path = destination / "qa.json"
+    qa_path = parsed / "qa.json"
     _write_json(
         qa_path,
         {
@@ -125,7 +134,37 @@ def run_pipeline(
             "issues": issues_to_dicts(issues),
         },
     )
+    parsed_manifest_path = parsed / "manifest.json"
+    _write_json(
+        parsed_manifest_path,
+        {
+            "schema_version": "pptx-wiki.parsed.v1",
+            "source": {
+                "name": source.name,
+                "size": source.stat().st_size,
+                "sha256": _file_sha256(source),
+            },
+            "paths": {
+                "deck": deck_path.relative_to(parsed).as_posix(),
+                "qa": qa_path.relative_to(parsed).as_posix(),
+                "corpus": corpus.output_dir.relative_to(parsed).as_posix(),
+                "provenance": corpus.provenance_path.relative_to(parsed).as_posix(),
+            },
+            "files": {
+                "deck_sha256": sha256(deck_path.read_bytes()).hexdigest(),
+                "qa_sha256": sha256(qa_path.read_bytes()).hexdigest(),
+                "provenance_sha256": corpus.digest,
+            },
+            "slide_count": corpus.slide_count,
+            "block_count": corpus.block_count,
+            "qa_error_count": sum(issue.severity == "error" for issue in issues),
+            "qa_issue_count": len(issues),
+            "ocr_successes": ocr_successes,
+            "ocr_failures": ocr_failures,
+        },
+    )
 
+    semantic = None
     wiki = None
     if synthesis_backend is not None:
         wiki = synthesize_wiki(
@@ -133,13 +172,18 @@ def run_pipeline(
             backend=synthesis_backend,
             output_dir=destination / "wiki",
             config=synthesis_config,
+            semantic_output_dir=destination / "semantic",
         )
+        semantic = wiki.semantic
     return PipelineResult(
         output_dir=destination,
+        parsed_dir=parsed,
+        parsed_manifest_path=parsed_manifest_path,
         deck_path=deck_path,
         corpus=corpus,
         qa_path=qa_path,
         issues=tuple(issues),
+        semantic=semantic,
         wiki=wiki,
         ocr_successes=ocr_successes,
         ocr_failures=ocr_failures,
@@ -363,6 +407,21 @@ def _write_json(path: Path, value: Any) -> None:
         encoding="utf-8",
         newline="\n",
     )
+
+
+def _ensure_empty_stage(path: Path, label: str) -> None:
+    if path.exists() and not path.is_dir():
+        raise ValueError(f"{label} output exists and is not a directory: {path}")
+    if path.exists() and any(path.iterdir()):
+        raise ValueError(f"{label} output directory is not empty: {path}")
+
+
+def _file_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _json_default(value: Any) -> Any:
