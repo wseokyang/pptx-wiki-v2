@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from .config import AppConfig
@@ -12,7 +13,9 @@ from .ocr import (
     PersistentOCRWorkerAdapter,
 )
 from .pipeline import PipelineConfig, PipelineResult, run_pipeline
-from .synthesis import OpenAICompatibleClient, SynthesisConfig
+from .semantic import SemanticConfig, build_semantic_output
+from .synthesis import OpenAICompatibleClient, WikiSynthesis
+from .wiki_publish import publish_wiki
 
 
 def run_configured(
@@ -29,21 +32,25 @@ def run_configured(
         if output_override is not None
         else config.output.path_for(source)
     )
-    _check_output(destination, config.output.allow_existing)
+    _check_output(
+        destination,
+        config.output.allow_existing,
+        stages=("parsed", "semantic", "wiki"),
+    )
     adapter = build_ocr_adapter(config)
-    synthesis_backend = (
+    semantic_backend = (
         OpenAICompatibleClient(
             base_url=config.llm_api.base_url,
             model=config.llm_api.model,
             api_key=config.llm_api.resolved_api_key(),
             timeout_seconds=config.llm_api.timeout_seconds,
         )
-        if config.wiki.enabled
+        if config.semantic.enabled
         else None
     )
     rendered_dir = config.render.rendered_slides_dir if adapter is not None else None
     try:
-        return run_pipeline(
+        result = run_pipeline(
             source,
             destination,
             config=PipelineConfig(
@@ -67,27 +74,55 @@ def run_configured(
             ),
             ocr_adapter=adapter,
             rendered_slides_dir=rendered_dir,
-            synthesis_backend=synthesis_backend,
-            synthesis_config=(
-                SynthesisConfig(
-                    language=config.wiki.language,
-                    max_input_chars=config.wiki.max_input_chars,
-                    max_output_tokens=min(
-                        config.wiki.max_output_tokens,
-                        config.llm_api.max_tokens,
-                    ),
-                    max_topics=config.wiki.max_topics,
-                    repair_attempts=config.wiki.repair_attempts,
-                    discover_topics=config.wiki.discover_topics,
-                )
-                if config.wiki.enabled
-                else None
-            ),
         )
     finally:
         close = getattr(adapter, "close", None)
         if callable(close):
             close()
+
+    semantic = None
+    wiki = None
+    if config.semantic.enabled:
+        assert semantic_backend is not None
+        semantic = build_semantic_output(
+            result.corpus.output_dir,
+            backend=semantic_backend,
+            output_dir=destination / "semantic",
+            config=SemanticConfig(
+                goal=config.semantic.goal or SemanticConfig().goal,
+                coverage_policy=config.semantic.coverage_policy,
+                language=config.semantic.language,
+                max_input_chars=config.semantic.max_input_chars,
+                max_output_tokens=min(
+                    config.semantic.max_output_tokens,
+                    config.llm_api.max_tokens,
+                ),
+                max_topics=config.semantic.max_topics,
+                repair_attempts=config.semantic.repair_attempts,
+                discover_topics=config.semantic.discover_topics,
+            ),
+        )
+    if config.wiki.enabled:
+        if semantic is None:
+            raise ValueError("wiki stage requires a semantic artifact")
+        published = publish_wiki(
+            semantic.output_dir,
+            result.corpus.output_dir,
+            destination / "wiki",
+        )
+        wiki = WikiSynthesis(
+            output_dir=published.output_dir,
+            index_path=published.index_path,
+            report_path=published.report_path,
+            topic_paths=published.page_paths,
+            topic_count=published.page_count,
+            fallback_pages=tuple(
+                f"{document_id}.md" for document_id in semantic.fallback_documents
+            ),
+            warnings=semantic.warnings,
+            semantic=semantic,
+        )
+    return replace(result, semantic=semantic, wiki=wiki)
 
 
 def build_ocr_adapter(config: AppConfig) -> OCRAdapter | None:
@@ -197,13 +232,24 @@ def build_ocr_adapter(config: AppConfig) -> OCRAdapter | None:
     raise ValueError(f"unsupported OCR backend: {settings.backend}")
 
 
-def _check_output(path: Path, allow_existing: bool) -> None:
+def _check_output(
+    path: Path,
+    allow_existing: bool,
+    *,
+    stages: tuple[str, ...] = (),
+) -> None:
     if path.exists() and not path.is_dir():
         raise ValueError(f"output path exists and is not a directory: {path}")
     if path.exists() and any(path.iterdir()) and not allow_existing:
         raise ValueError(
             f"output directory is not empty: {path}; change output.directory or explicitly set output.allow_existing=true"
         )
+    for stage in stages:
+        target = path / stage
+        if target.exists() and not target.is_dir():
+            raise ValueError(f"{stage} output exists and is not a directory: {target}")
+        if target.exists() and any(target.iterdir()):
+            raise ValueError(f"{stage} output directory is not empty: {target}")
 
 
 __all__ = ["build_ocr_adapter", "run_configured"]

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pptx-wiki"
-version = "0.1.0"
-description = "Structure-first PPTX extraction and local/VLM-assisted conversion to an LLM-ready wiki"
+version = "0.2.0"
+description = "Structure-first PPTX parsing, grounded semantic reorganisation, and deterministic Wiki publishing"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

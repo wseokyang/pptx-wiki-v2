@@ -1,6 +1,6 @@
 # pptx-wiki configuration for Windows
 # Only the PPTX path is required by run.py; edit this file once.
-version: 1
+version: 2
 
 output:
   # Relative paths are resolved from this config.yml file.
@@ -9,7 +9,7 @@ output:
   subdirectory_per_pptx: true
   # stem_hash avoids collisions when different folders contain the same PPTX filename.
   naming: stem_hash
-  # Keep false to prevent accidental overwrites of an earlier result.
+  # true permits unrelated files in the root, but existing stage artifacts are never overwritten.
   allow_existing: false
 
 render:
@@ -42,7 +42,7 @@ vlm_api:
   timeout_seconds: 180
   max_tokens: 8192
 
-# OpenAI-compatible text LLM endpoint used to reorganize the grounded corpus into wiki pages.
+# OpenAI-compatible text LLM endpoint used for semantic corpus generation.
 # It may be the same server as vlm_api with a different model.
 llm_api:
   base_url: ""
@@ -97,14 +97,21 @@ ocr:
     cwd: null
     timeout_seconds: 300
 
-wiki:
+semantic:
   enabled: true
+  # Optional intent that guides topic selection and content emphasis.
+  goal: "핵심 업무 내용만 보존하고 PPT 작성 가이드, 템플릿 문구, 무관한 예시는 제외합니다."
+  # selected omits content outside the goal while recording every omission in semantic/manifest.json.
+  coverage_policy: selected
   language: Korean
   max_input_chars: 36000
   max_output_tokens: 4096
   max_topics: 64
   repair_attempts: 2
   discover_topics: true
+
+wiki:
+  enabled: true
 
 network:
   # Keep false unless the endpoint intentionally receives document crops over a network.

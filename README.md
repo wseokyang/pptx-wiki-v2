@@ -1,8 +1,8 @@
 # pptx-wiki
 
-한국어 텍스트박스와 표가 많은 PPTX를 구조 우선 방식으로 추출하고,
-필요한 픽셀 영역만 OCR/VLM으로 보완한 뒤 LLM용 Wiki Markdown과
-provenance JSONL을 만드는 파이프라인입니다.
+한국어 텍스트박스와 표가 많은 PPTX를 구조 우선 방식으로 추출한 뒤,
+원본 충실 산출물(`parsed`)과 의미 기반 재정리 산출물(`semantic`)을 각각 남기고,
+검증된 semantic 산출물을 Markdown Wiki로 게시하는 파이프라인입니다.
 
 ## 설계 원칙
 
@@ -11,8 +11,10 @@ provenance JSONL을 만드는 파이프라인입니다.
 3. 그림·차트·SmartArt 같은 시각 객체만 개별 ROI로 렌더링합니다.
 4. ROI의 원본 픽셀은 이웃 객체와 겹치지 않게 중간 경계에서 자릅니다.
 5. 모델에 필요한 여백은 crop 이후 흰색 픽셀로 추가합니다.
-6. 원본에 충실한 slide corpus와 LLM이 재구성한 wiki를 분리합니다.
-7. LLM 결과는 기존 block citation과 숫자만 사용할 수 있으며, 검증 실패 시
+6. `parsed`는 LLM 없이 만들며 이후 단계가 수정하지 않는 원본 근거입니다.
+7. `semantic`에서만 LLM을 사용해 목적에 맞는 근거를 선택하고 주제별로 재구성합니다.
+8. `wiki`는 LLM을 호출하지 않고 검증된 semantic 문서를 Markdown으로 게시합니다.
+9. LLM 결과는 기존 block citation과 숫자만 사용할 수 있으며, 검증 실패 시
    원문 block을 그대로 쓰는 fail-closed fallback으로 전환합니다.
 
 따라서 1pt 간격의 네이티브 표 두 개도 한 표로 OCR되지 않습니다. 단, 하나의
@@ -47,7 +49,7 @@ CPU라면 `-Runtime cpu`를 사용합니다. 나머지 세 모델의 정확한 �
 `pip freeze` 파일로 기록합니다.
 
 그다음 `setup-windows.ps1`이 [config.example.yml](./config.example.yml)을 복사해
-만든 로컬 `config.yml`에서 OCR profile과 Wiki 합성용 endpoint를 설정합니다.
+만든 로컬 `config.yml`에서 OCR profile과 semantic 단계용 endpoint를 설정합니다.
 `config.yml`은 API key 보호를 위해 Git에서 제외됩니다. 로컬 OCR만 사용할 때
 `vlm_api`는 비워 두어도 됩니다.
 
@@ -65,9 +67,17 @@ llm_api:
   model: my-llm
   api_key: ""
   api_key_env: PPTX_WIKI_API_KEY
+
+semantic:
+  enabled: true
+  goal: "핵심 업무 내용만 보존하고 작성 가이드와 무관한 예시는 제외합니다."
+  coverage_policy: selected
+
+wiki:
+  enabled: true
 ```
 
-현재 PowerShell 세션에 Wiki LLM key를 넣으려면:
+현재 PowerShell 세션에 semantic LLM key를 넣으려면:
 
 ```powershell
 $env:PPTX_WIKI_API_KEY = "your-key"
@@ -112,7 +122,7 @@ Windows 기본 설정은 다음과 같습니다.
 ## 설치
 
 ```bash
-cd /home/wooseok/wsy/pptx-wiki
+cd pptx-wiki
 python3 -m venv .venv
 .venv/bin/pip install -e '.[api]'
 ```
@@ -121,34 +131,65 @@ PPTX를 직접 렌더링하려면 LibreOffice와 Poppler의 `pdftocairo`가 필�
 Windows에서 글꼴과 배치 보존이 특히 중요하면 PowerPoint로 미리 PNG/PDF를
 내보낸 뒤 `--rendered-slides-dir`을 사용하는 편이 더 정확합니다.
 
-## 1. 네이티브 구조만 추출
+## 단계별 실행
+
+### 1. parsed — 원본 충실 추출
 
 ```bash
-.venv/bin/pptx-wiki run input.pptx -o output/native
+.venv/bin/pptx-wiki parse input.pptx -o output/my-deck
 ```
 
 텍스트박스, 네이티브 표, 병합 셀, 그룹 좌표, 발표자 노트가 추출됩니다.
-이 모드는 GPU와 외부 API가 필요 없습니다.
+결과는 `output/my-deck/parsed/` 아래에 생성됩니다. 이미지 OCR을 사용하지 않는다면
+GPU, LLM, 외부 API가 필요 없습니다.
 
-## 2. 보유 중인 OpenAI-compatible VLM과 LLM 사용
+### 2. semantic — 의미 기반 선택·재정리
 
 ```bash
 export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
 export OPENAI_API_KEY=local-key
-export OPENAI_VLM_MODEL=my-vlm
 export OPENAI_LLM_MODEL=my-llm
 
-.venv/bin/pptx-wiki run input.pptx -o output/full \
-  --ocr openai_vlm \
-  --vlm-response-format json_schema \
-  --synthesize
+.venv/bin/pptx-wiki organize output/my-deck/parsed \
+  -o output/my-deck/semantic \
+  --goal "핵심 업무 내용만 보존하고 작성 가이드와 무관한 예시는 제외합니다." \
+  --coverage-policy selected
 ```
 
-API key가 필요 없는 로컬 서버라면 `OPENAI_API_KEY`를 설정하지 않아도 됩니다.
-`response_format=json_schema`를 지원하지 않는 서버는 `json_object` 또는 `none`을
-사용하십시오.
+이 단계만 OpenAI-compatible 텍스트 LLM이 필요합니다. `selected` 정책에서는 목적과
+무관한 block을 제외할 수 있고, 제외된 citation은 `semantic/manifest.json`의
+`omitted_citations`에 남습니다. `complete` 정책은 모든 근거를 semantic 문서에
+포함합니다. 생성된 문서 본문과 선택 근거는 `semantic/documents.jsonl`에 저장됩니다.
 
-## 3. 내장 로컬 OCR 모델 사용
+API key가 필요 없는 로컬 서버라면 `OPENAI_API_KEY`를 설정하지 않아도 됩니다.
+
+### 3. wiki — Markdown 게시
+
+```bash
+.venv/bin/pptx-wiki wiki output/my-deck/semantic \
+  --parsed output/my-deck/parsed \
+  -o output/my-deck/wiki
+```
+
+이 단계는 LLM을 호출하지 않습니다. semantic 문서와 parsed provenance의 hash 및
+citation을 검증한 다음 `index.md`, 주제별 Markdown, `publish-report.json`을 만듭니다.
+
+세 단계를 한 번에 실행하는 기존 단축 명령도 유지됩니다.
+
+```bash
+.venv/bin/pptx-wiki run input.pptx -o output/my-deck \
+  --synthesize \
+  --coverage-policy selected \
+  --llm-base-url http://127.0.0.1:8000/v1 \
+  --llm-model my-llm
+```
+
+시각 객체 OCR에 OpenAI-compatible VLM을 사용하려면 parse/run 명령에
+`--ocr openai_vlm --vlm-base-url ... --vlm-model ...`을 추가합니다.
+`response_format=json_schema`를 지원하지 않는 VLM 서버는 `json_object` 또는
+`none`을 사용하십시오.
+
+## 내장 로컬 OCR 모델 사용
 
 네 worker는 Hugging Face 모델을 고정 commit으로 먼저 다운로드한 뒤 추론 때는
 offline 모드만 사용합니다. `config.yml`에는 repo ID가 아니라 검토된 profile만
@@ -180,7 +221,7 @@ ocr:
 `vlm_api`를 설정합니다. 외부 endpoint라면 crop 전송에 해당하므로 `network` 허용도
 필요합니다.
 
-## 4. 모델별 환경을 직접 점검하기
+## 모델별 환경을 직접 점검하기
 
 각 worker는 단건 실행과 장기 JSONL 실행을 모두 제공합니다. 설치된 실제 패키지
 목록은 worker 디렉터리에 setup이 남긴 `*.freeze.txt`에서 확인합니다. 다운로드만
@@ -220,7 +261,7 @@ worker 공통 결과 형식은 다음과 같습니다.
 권장합니다.
 
 ```bash
-.venv/bin/pptx-wiki run input.pptx -o output/full \
+.venv/bin/pptx-wiki run input.pptx -o output/my-deck \
   --rendered-slides-dir ./rendered-300dpi \
   --ocr openai_vlm \
   --synthesize
@@ -232,24 +273,29 @@ worker 공통 결과 형식은 다음과 같습니다.
 ## 출력 구조
 
 ```text
-output/
-├── deck.json                 # 전체 native/OCR 중간 표현
-├── qa.json                   # 추출 경고, OCR 실패, 숫자 충돌
-├── source-assets/            # PPTX에 포함된 원본 이미지
-├── rendered/                 # 슬라이드 렌더 이미지
-├── roi/                      # 서로 겹치지 않는 모델 입력 crop
-├── ocr-results/              # backend 원본 결과
-├── corpus/
+output/my-deck/
+├── parsed/                   # 1차 산출물: 원본 충실, LLM 불필요
 │   ├── manifest.json
-│   ├── provenance.jsonl      # element 단위 근거와 bbox/hash
-│   └── slides/slide-0001.md  # 원본 충실 Markdown
-└── wiki/
+│   ├── deck.json             # 전체 native/OCR 중간 표현
+│   ├── qa.json               # 추출 경고, OCR 실패, 숫자 충돌
+│   ├── source-assets/        # PPTX에 포함된 원본 이미지
+│   ├── rendered/             # 슬라이드 렌더 이미지
+│   ├── roi/                  # 서로 겹치지 않는 모델 입력 crop
+│   ├── ocr-results/          # backend 원본 결과
+│   └── corpus/
+│       ├── manifest.json
+│       ├── provenance.jsonl  # element 단위 근거와 bbox/hash
+│       └── slides/slide-0001.md
+├── semantic/                 # 2차 산출물: LLM 의미 기반 선택·재정리
+│   ├── manifest.json         # 선택/제외 citation, 입력·출력 hash
+│   └── documents.jsonl       # 게시 전의 주제별 의미 문서
+└── wiki/                     # 후속 게시 산출물: LLM 호출 없음
     ├── index.md
-    ├── *.md                  # LLM이 주제별로 재구성한 문서
-    └── synthesis-report.json
+    ├── *.md
+    └── publish-report.json
 ```
 
-Wiki의 사실 문장은 `[slide-N#element-id]` 형식으로 원본 block을 가리킵니다.
+semantic과 Wiki의 사실 문장은 `[slide-N#element-id]` 형식으로 원본 block을 가리킵니다.
 네이티브 표 두 개는 corpus와 wiki prompt에서 서로 다른 table boundary와 citation을
 유지합니다. 숫자·퍼센트·단위를 새로 만들거나 계산한 LLM 출력은 검증에서 거부됩니다.
 

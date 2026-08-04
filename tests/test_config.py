@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
+import pptx_wiki.configured as configured_module
 from pptx_wiki.config import APISettings, OutputSettings, load_config
 from pptx_wiki.configured import build_ocr_adapter
 from pptx_wiki.ocr import OpenAICompatibleVLMAdapter, PersistentOCRWorkerAdapter
@@ -30,6 +32,26 @@ network: {}
     )
 
 
+def _v2_yaml(*, semantic_enabled: bool, wiki_enabled: bool, llm_api: str = "{}") -> str:
+    return f"""version: 2
+output:
+  directory: ./results
+render:
+  backend: powerpoint
+extraction: {{}}
+vlm_api: {{}}
+llm_api: {llm_api}
+ocr:
+  enabled: false
+  backend: none
+semantic:
+  enabled: {str(semantic_enabled).lower()}
+wiki:
+  enabled: {str(wiki_enabled).lower()}
+network: {{}}
+"""
+
+
 def _write(tmp_path: Path, value: str) -> Path:
     path = tmp_path / "config.yml"
     path.write_text(value, encoding="utf-8")
@@ -41,6 +63,170 @@ def test_load_config_resolves_paths_from_config_directory(tmp_path: Path) -> Non
     assert config.output.directory == (tmp_path / "results").resolve()
     assert config.render.backend == "powerpoint"
     assert config.ocr.enabled is False
+
+
+def test_version_1_wiki_settings_map_to_semantic_and_emit_warning(tmp_path: Path) -> None:
+    value = _base_yaml().replace(
+        "llm_api: {}",
+        "llm_api:\n  base_url: http://127.0.0.1:8001/v1\n  model: local-text",
+    ).replace(
+        "wiki:\n  enabled: false",
+        """wiki:
+  enabled: true
+  language: English
+  max_input_chars: 12000
+  max_output_tokens: 2048
+  max_topics: 12
+  repair_attempts: 1
+  discover_topics: false""",
+    )
+
+    config = load_config(_write(tmp_path, value))
+
+    assert config.semantic.enabled is True
+    assert config.semantic.goal == ""
+    assert config.semantic.coverage_policy == "complete"
+    assert config.semantic.language == "English"
+    assert config.semantic.max_input_chars == 12_000
+    assert config.semantic.max_output_tokens == 2_048
+    assert config.semantic.max_topics == 12
+    assert config.semantic.repair_attempts == 1
+    assert config.semantic.discover_topics is False
+    assert config.wiki.enabled is True
+    assert any("version 1 is deprecated" in warning for warning in config.warnings)
+
+
+def test_version_2_loads_semantic_settings_separately_from_wiki(tmp_path: Path) -> None:
+    value = _v2_yaml(
+        semantic_enabled=True,
+        wiki_enabled=True,
+    ).replace(
+        "llm_api: {}\n",
+        "llm_api:\n  base_url: http://127.0.0.1:8001/v1\n  model: local-text\n",
+    ).replace(
+        "semantic:\n  enabled: true",
+        """semantic:
+  enabled: true
+  goal: Focus on deployment
+  coverage_policy: selected
+  language: English
+  max_input_chars: 16000
+  max_output_tokens: 3072
+  max_topics: 20
+  repair_attempts: 3
+  discover_topics: false""",
+    )
+
+    config = load_config(_write(tmp_path, value))
+
+    assert config.semantic.goal == "Focus on deployment"
+    assert config.semantic.coverage_policy == "selected"
+    assert config.semantic.language == "English"
+    assert config.semantic.max_input_chars == 16_000
+    assert config.semantic.max_output_tokens == 3_072
+    assert config.semantic.max_topics == 20
+    assert config.semantic.repair_attempts == 3
+    assert config.semantic.discover_topics is False
+    assert config.wiki.enabled is True
+    assert config.warnings == ()
+
+
+@pytest.mark.parametrize(
+    "semantic_enabled,wiki_enabled,match",
+    [
+        (True, False, "llm_api.base_url"),
+        (False, True, "wiki.enabled requires semantic.enabled"),
+    ],
+)
+def test_version_2_validates_stage_dependencies(
+    tmp_path: Path,
+    semantic_enabled: bool,
+    wiki_enabled: bool,
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        load_config(
+            _write(
+                tmp_path,
+                _v2_yaml(
+                    semantic_enabled=semantic_enabled,
+                    wiki_enabled=wiki_enabled,
+                ),
+            )
+        )
+
+
+def test_version_2_needs_no_llm_endpoint_when_semantic_is_disabled(tmp_path: Path) -> None:
+    config = load_config(
+        _write(tmp_path, _v2_yaml(semantic_enabled=False, wiki_enabled=False))
+    )
+    assert config.semantic.enabled is False
+    assert config.wiki.enabled is False
+
+
+def test_version_2_rejects_legacy_wiki_settings(tmp_path: Path) -> None:
+    value = _v2_yaml(semantic_enabled=False, wiki_enabled=False).replace(
+        "wiki:\n  enabled: false",
+        "wiki:\n  enabled: false\n  language: Korean",
+    )
+    with pytest.raises(ValueError, match="unknown wiki setting.*language"):
+        load_config(_write(tmp_path, value))
+
+
+def test_version_2_rejects_unknown_coverage_policy(tmp_path: Path) -> None:
+    value = _v2_yaml(semantic_enabled=False, wiki_enabled=False).replace(
+        "semantic:\n  enabled: false",
+        "semantic:\n  enabled: false\n  coverage_policy: partial",
+    )
+    with pytest.raises(ValueError, match="semantic.coverage_policy must be one of"):
+        load_config(_write(tmp_path, value))
+
+
+@pytest.mark.parametrize(
+    "stage,semantic_enabled,wiki_enabled",
+    [
+        ("parsed", False, False),
+        ("semantic", True, False),
+        ("wiki", True, True),
+    ],
+)
+def test_allow_existing_still_rejects_nonempty_target_stage_before_parsing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    semantic_enabled: bool,
+    wiki_enabled: bool,
+) -> None:
+    value = _v2_yaml(
+        semantic_enabled=semantic_enabled,
+        wiki_enabled=wiki_enabled,
+    ).replace(
+        "  directory: ./results\n",
+        "  directory: ./results\n  allow_existing: true\n",
+    )
+    if semantic_enabled:
+        value = value.replace(
+            "llm_api: {}\n",
+            "llm_api:\n  base_url: http://127.0.0.1:8001/v1\n  model: local-text\n",
+        )
+    config = load_config(_write(tmp_path, value))
+    source = tmp_path / "source.pptx"
+    source.write_bytes(b"preflight-only")
+    output = tmp_path / "existing-output"
+    target = output / stage
+    target.mkdir(parents=True)
+    marker = target / "keep.txt"
+    marker.write_text("unchanged", encoding="utf-8")
+
+    def fail_if_parsing_starts(*args, **kwargs):
+        pytest.fail("run_pipeline was called before stage output preflight")
+
+    monkeypatch.setattr(configured_module, "run_pipeline", fail_if_parsing_starts)
+
+    with pytest.raises(ValueError, match="not empty"):
+        configured_module.run_configured(source, config, output_override=output)
+
+    assert marker.read_text(encoding="utf-8") == "unchanged"
 
 
 def test_config_rejects_duplicate_key(tmp_path: Path) -> None:
@@ -117,7 +303,11 @@ def test_local_openai_endpoint_builds_consistent_v1_chat_url(tmp_path: Path) -> 
 
 def test_local_model_profile_needs_no_vlm_endpoint_and_resolves_bundle_paths(tmp_path: Path) -> None:
     profile = tmp_path / "workers" / "ovisocr2"
-    python_path = profile / ".venv" / "bin" / "python"
+    python_path = (
+        profile / ".venv" / "Scripts" / "python.exe"
+        if os.name == "nt"
+        else profile / ".venv" / "bin" / "python"
+    )
     python_path.parent.mkdir(parents=True)
     python_path.write_text("", encoding="utf-8")
     worker_path = profile / "worker.py"
