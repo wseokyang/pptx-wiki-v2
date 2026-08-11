@@ -100,6 +100,9 @@ ocr:
 semantic:
   enabled: true
   # Optional intent that guides topic selection and content emphasis.
+  # The batch command scans every body/table/OCR block for one or more PR
+  # numbers (including PR 번호/PR No./의뢰번호 labels) and preserves every
+  # exact spelling independently of this prompt.
   goal: "핵심 업무 내용만 보존하고 PPT 작성 가이드, 템플릿 문구, 무관한 예시는 제외합니다."
   # selected omits content outside the goal while recording every omission in semantic/manifest.json.
   coverage_policy: selected

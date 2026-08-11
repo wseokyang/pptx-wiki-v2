@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 from zipfile import BadZipFile, ZipFile
 from xml.etree import ElementTree
 
@@ -25,8 +26,32 @@ def validate_pptx_archive(
     source = Path(path)
     if source.suffix.lower() != ".pptx":
         raise ValueError("only macro-free .pptx input is accepted")
+    with source.open("rb") as handle:
+        validate_pptx_stream(
+            handle,
+            filename=source.name,
+            limits=limits,
+            reject_external_resources=reject_external_resources,
+        )
+
+
+def validate_pptx_stream(
+    stream: BinaryIO,
+    *,
+    filename: str,
+    limits: ArchiveLimits = ArchiveLimits(),
+    reject_external_resources: bool = False,
+) -> None:
+    """Validate PPTX bytes from an already opened, caller-owned handle."""
+
+    if Path(filename).suffix.casefold() != ".pptx":
+        raise ValueError("only macro-free .pptx input is accepted")
     try:
-        with ZipFile(source) as archive:
+        stream.seek(0)
+    except (AttributeError, OSError) as exc:
+        raise ValueError("PPTX validation requires a seekable binary stream") from exc
+    try:
+        with ZipFile(stream) as archive:
             members = archive.infolist()
             if len(members) > limits.max_members:
                 raise ValueError(f"PPTX contains too many archive members: {len(members)}")
