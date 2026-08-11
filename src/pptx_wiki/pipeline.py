@@ -62,6 +62,7 @@ def run_pipeline(
     rendered_slides_dir: str | Path | None = None,
     synthesis_backend: ChatBackend | None = None,
     synthesis_config: SynthesisConfig | None = None,
+    source_display_path: str | None = None,
 ) -> PipelineResult:
     """Run parsed extraction and optionally continue through semantic and Wiki stages."""
 
@@ -85,6 +86,16 @@ def run_pipeline(
         include_empty_shapes=settings.include_empty_shapes,
         strict=settings.strict_extraction,
     )
+    if source_display_path is not None:
+        display = str(source_display_path).strip()
+        if (
+            not display
+            or "\n" in display
+            or "\r" in display
+            or Path(display).name != display
+        ):
+            raise ValueError("source_display_path must be one local filename")
+        deck.source_path = display
 
     ocr_successes = 0
     ocr_failures = 0

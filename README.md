@@ -1,5 +1,73 @@
 # pptx-wiki
 
+## 여러 PPTX를 한 번에 처리하기
+
+`batch` 명령은 여러 PPTX를 아래 순서로 한 번에 처리합니다.
+
+1. 각 PPTX를 원본 구조 그대로 `parsed`에 추출합니다. `ocr` 설정이 켜져 있으면 네이티브 추출로 읽지 못한 시각 객체만 OCR/VL 모델로 보완합니다.
+2. 각 parsed 근거를 LLM으로 선별·재구성해 PPTX당 `semantic.md` 한 개를 만듭니다. 작성 가이드, 템플릿, 무관한 예시와 정확히 중복된 블록은 제외하되 모든 결정은 `decisions.jsonl`에 기록합니다.
+3. 모든 `semantic.md`를 다시 읽고, 출처가 한정된 주제·엔터티를 만든 뒤 Quartz가 바로 읽을 수 있는 `quartz/content/`를 게시합니다.
+
+PR 번호는 선택 정보가 아닙니다. 프로그램이 parsed provenance의 본문·표·OCR에서 `PR 번호`, `PR No.`, `의뢰번호` 라벨과 명시적인 `PR-...` 표기를 찾아 원문 값을 고정하며, 한 PPTX 안의 여러 번호도 모두 보존합니다. LLM이 번호를 빠뜨리거나 바꿀 수 없습니다. 번호가 이미지에만 있으면 `config.yml`에서 OCR/VL을 활성화해야 합니다. 번호를 찾지 못한 파일이 하나라도 있으면 LLM 호출 전에 실패합니다.
+
+```powershell
+.\.venv\Scripts\pptx-wiki.exe batch `
+  "D:\reliability\incoming" `
+  --recursive `
+  --config .\config.yml `
+  --output "D:\reliability\wiki-build"
+```
+
+파일을 직접 여러 개 지정해도 됩니다.
+
+```powershell
+.\.venv\Scripts\pptx-wiki.exe batch .\PR-001.pptx .\PR-002.pptx `
+  --config .\config.yml -o .\output\collection
+```
+
+Windows용 실행 스크립트도 같은 일괄 흐름을 지원합니다.
+
+```powershell
+python .\run.py "D:\reliability\incoming" --batch --recursive `
+  --config .\config.yml --output "D:\reliability\wiki-build"
+```
+
+`config.yml`은 `semantic.enabled: true`, `wiki.enabled: true`, `semantic.coverage_policy: selected`여야 의도한 불필요 내용 제거가 수행됩니다. LLM과 VLM은 서로 다른 `llm_api`, `vlm_api` 설정을 사용합니다.
+
+주요 출력은 다음과 같습니다.
+
+```text
+collection/
+  README.md                    # 아래 세 최종 산출물의 링크 모음
+  collection-manifest.json
+  sources/<source-id>/
+    source.json
+    parsed/                 # 원본 충실 추출물
+    semantic/
+      semantic.md           # PPTX당 의미 기반 정리 1개
+      documents.jsonl
+      decisions.jsonl
+      manifest.json
+  integrated/
+    source-map.jsonl        # deck-local citation을 전역 citation으로 매핑
+    entities.jsonl
+    pages.jsonl
+    coverage.jsonl
+    manifest.json
+  quartz/
+    content/                # Quartz 프로젝트의 content/로 사용
+      index.md
+      topics/
+      entities/
+      prs/
+      sources/
+      evidence/
+    quartz-manifest.json
+    README.md
+```
+
+Quartz 프로젝트에 `quartz/content/`를 복사한 뒤 `npx quartz build`로 빌드할 수 있습니다. Quartz의 콘텐츠 루트와 frontmatter/wikilink 규칙은 [Authoring Content](https://quartz.jzhao.xyz/authoring-content), [Frontmatter](https://quartz.jzhao.xyz/plugins/Frontmatter), [Wikilinks](https://quartz.jzhao.xyz/features/wikilinks)를 따릅니다.
+
 한국어 텍스트박스와 표가 많은 PPTX를 구조 우선 방식으로 추출한 뒤,
 원본 충실 산출물(`parsed`)과 의미 기반 재정리 산출물(`semantic`)을 각각 남기고,
 검증된 semantic 산출물을 Markdown Wiki로 게시하는 파이프라인입니다.

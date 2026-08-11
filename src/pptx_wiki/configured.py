@@ -2,8 +2,16 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Sequence
 
+from .collection import (
+    DEFAULT_COLLECTION_GOAL,
+    CollectionConfig,
+    CollectionResult,
+    run_collection,
+)
 from .config import AppConfig
+from .integration import IntegrationConfig
 from .ocr import (
     CommandOCRAdapter,
     FallbackOCRAdapter,
@@ -123,6 +131,104 @@ def run_configured(
             semantic=semantic,
         )
     return replace(result, semantic=semantic, wiki=wiki)
+
+
+def run_configured_collection(
+    inputs: Sequence[str | Path],
+    config: AppConfig,
+    *,
+    output_dir: str | Path,
+    recursive: bool = False,
+    site_title: str = "신뢰성 분석 LLM Wiki",
+    max_entities: int = 256,
+    max_files: int = 500,
+    max_total_bytes: int = 4 * 1024 * 1024 * 1024,
+) -> CollectionResult:
+    """Run the trusted-config one-shot pipeline for multiple PPTX files."""
+
+    if not config.semantic.enabled:
+        raise ValueError("collection requires semantic.enabled=true")
+    if not config.wiki.enabled:
+        raise ValueError("collection requires wiki.enabled=true")
+    if config.render.rendered_slides_dir is not None:
+        raise ValueError(
+            "render.rendered_slides_dir is ambiguous for a collection; "
+            "disable it and let each PPTX be rendered independently"
+        )
+    destination = Path(output_dir).expanduser().absolute()
+    adapter = build_ocr_adapter(config)
+    backend = OpenAICompatibleClient(
+        base_url=config.llm_api.base_url,
+        model=config.llm_api.model,
+        api_key=config.llm_api.resolved_api_key(),
+        timeout_seconds=config.llm_api.timeout_seconds,
+    )
+    goal = config.semantic.goal or DEFAULT_COLLECTION_GOAL
+    try:
+        return run_collection(
+            inputs,
+            destination,
+            semantic_backend=backend,
+            integration_backend=backend,
+            ocr_adapter=adapter,
+            config=CollectionConfig(
+                pipeline=PipelineConfig(
+                    render_backend=config.render.backend,
+                    dpi=config.render.dpi,
+                    source_padding_ratio=config.render.source_padding_ratio,
+                    model_padding_px=config.render.model_padding_px,
+                    include_empty_shapes=config.extraction.include_empty_shapes,
+                    strict_extraction=config.extraction.strict,
+                    strict_ocr=config.ocr.strict,
+                    office_binary=config.render.office_binary,
+                    pdf_binary=config.render.pdf_binary,
+                    scrub_env_vars=tuple(
+                        dict.fromkeys(
+                            name
+                            for name in (
+                                config.vlm_api.api_key_env,
+                                config.llm_api.api_key_env,
+                            )
+                            if name
+                        )
+                    ),
+                    block_external_resources=config.render.block_external_resources,
+                ),
+                semantic=SemanticConfig(
+                    goal=goal,
+                    coverage_policy=config.semantic.coverage_policy,
+                    language=config.semantic.language,
+                    max_input_chars=config.semantic.max_input_chars,
+                    max_output_tokens=min(
+                        config.semantic.max_output_tokens,
+                        config.llm_api.max_tokens,
+                    ),
+                    max_topics=config.semantic.max_topics,
+                    repair_attempts=config.semantic.repair_attempts,
+                    discover_topics=config.semantic.discover_topics,
+                ),
+                integration=IntegrationConfig(
+                    goal=goal,
+                    language=config.semantic.language,
+                    max_input_chars=config.semantic.max_input_chars,
+                    max_output_tokens=min(
+                        config.semantic.max_output_tokens,
+                        config.llm_api.max_tokens,
+                    ),
+                    max_entities=max_entities,
+                    max_topics=config.semantic.max_topics,
+                    repair_attempts=config.semantic.repair_attempts,
+                ),
+                recursive=recursive,
+                site_title=site_title,
+                max_files=max_files,
+                max_total_bytes=max_total_bytes,
+            ),
+        )
+    finally:
+        close = getattr(adapter, "close", None)
+        if callable(close):
+            close()
 
 
 def build_ocr_adapter(config: AppConfig) -> OCRAdapter | None:
@@ -252,4 +358,4 @@ def _check_output(
             raise ValueError(f"{stage} output directory is not empty: {target}")
 
 
-__all__ = ["build_ocr_adapter", "run_configured"]
+__all__ = ["build_ocr_adapter", "run_configured", "run_configured_collection"]

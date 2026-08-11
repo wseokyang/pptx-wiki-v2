@@ -8,7 +8,8 @@ import sys
 from typing import Sequence
 
 from .config import load_config
-from .configured import run_configured
+from .collection import DEFAULT_COLLECTION_GOAL
+from .configured import run_configured, run_configured_collection
 from .ocr import CommandOCRAdapter, FallbackOCRAdapter, OpenAICompatibleVLMAdapter, PaddleOCRCLIAdapter
 from .pipeline import PipelineConfig, run_pipeline
 from .semantic import SemanticConfig, build_semantic_output
@@ -35,6 +36,25 @@ def _parser() -> argparse.ArgumentParser:
     convert.add_argument("input", type=Path)
     convert.add_argument("--config", required=True, type=Path)
     convert.add_argument("-o", "--output", type=Path)
+
+    collection = subparsers.add_parser(
+        "batch",
+        aliases=["collection"],
+        help="process multiple PPTX files through parsed, semantic, integrated, and Quartz stages",
+    )
+    collection.add_argument(
+        "input",
+        nargs="+",
+        type=Path,
+        help="one or more .pptx files or directories",
+    )
+    collection.add_argument("--config", required=True, type=Path)
+    collection.add_argument("-o", "--output", required=True, type=Path)
+    collection.add_argument("--recursive", action="store_true")
+    collection.add_argument("--site-title", default="신뢰성 분석 LLM Wiki")
+    collection.add_argument("--max-entities", type=int, default=256)
+    collection.add_argument("--max-files", type=int, default=500)
+    collection.add_argument("--max-total-mib", type=int, default=4096)
 
     parse = subparsers.add_parser("parse", help="create the source-faithful parsed artifact")
     _add_parse_arguments(parse, include_semantic=False)
@@ -352,6 +372,61 @@ def _convert(args: argparse.Namespace) -> int:
     return 0
 
 
+def _collection(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    output = args.output.expanduser().absolute()
+    for warning in config.warnings:
+        print(f"pptx-wiki: warning: {warning}", file=sys.stderr)
+    preflight = {
+        "config": str(config.source_path),
+        "inputs": [str(value.expanduser().resolve()) for value in args.input],
+        "recursive": bool(args.recursive),
+        "output": str(output),
+        "ocr": {
+            "enabled": config.ocr.enabled,
+            "backend": config.ocr.backend,
+            "model": (
+                config.ocr.local_model.model
+                if "local" in config.ocr.backend
+                else config.vlm_api.model if "vlm" in config.ocr.backend else None
+            ),
+        },
+        "semantic": {
+            "goal": config.semantic.goal or DEFAULT_COLLECTION_GOAL,
+            "coverage_policy": config.semantic.coverage_policy,
+            "model": config.llm_api.model,
+        },
+        "quartz": {"site_title": args.site_title},
+    }
+    print("Collection preflight (secrets redacted):")
+    print(json.dumps(preflight, ensure_ascii=False, indent=2))
+    result = run_configured_collection(
+        args.input,
+        config,
+        output_dir=output,
+        recursive=bool(args.recursive),
+        site_title=args.site_title,
+        max_entities=args.max_entities,
+        max_files=args.max_files,
+        max_total_bytes=args.max_total_mib * 1024 * 1024,
+    )
+    summary = {
+        "output_dir": str(result.output_dir),
+        "input_files": result.input_count,
+        "unique_decks": result.unique_source_count,
+        "pr_numbers": list(result.pr_numbers),
+        "parsed_slides": sum(source.parsed.corpus.slide_count for source in result.sources),
+        "semantic_markdown_files": len(result.sources),
+        "entities": result.integrated.entity_count,
+        "integrated_pages": result.integrated.page_count,
+        "quartz_pages": result.quartz.page_count,
+        "quartz_content": str(result.quartz.content_dir),
+    }
+    print("Completed:")
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _result_summary(result) -> dict[str, object]:
     semantic = getattr(result, "semantic", None)
     wiki = getattr(result, "wiki", None)
@@ -377,6 +452,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "convert":
             return _convert(args)
+        if args.command in {"batch", "collection"}:
+            return _collection(args)
         if args.command == "parse":
             return _parse(args)
         if args.command == "run":
