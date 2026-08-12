@@ -98,6 +98,32 @@ def _write_case_variant_identifier_pptx(path: Path) -> Path:
     return path
 
 
+def _write_repeated_prs_in_different_order(path: Path) -> Path:
+    """Put a source-level PR before a later citation that reverses the order."""
+
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[5])
+    slide.shapes.title.text = "Reliability Results"
+
+    first = slide.shapes.add_textbox(
+        Inches(0.5), Inches(1.5), Inches(7.0), Inches(0.8)
+    )
+    first.name = "FIRST_REQUEST"
+    first.text_frame.text = "PR-00123 reliability result: passed"
+
+    repeated = slide.shapes.add_textbox(
+        Inches(0.5), Inches(2.5), Inches(7.0), Inches(0.8)
+    )
+    repeated.name = "REVERSED_REQUESTS"
+    repeated.text_frame.text = (
+        "PR 00456 comparison result: review\n"
+        "PR 00123 baseline result: passed"
+    )
+
+    presentation.save(path)
+    return path
+
+
 def _write_pptx_with_image(path: Path, image_path: Path) -> Path:
     presentation = Presentation()
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
@@ -602,6 +628,53 @@ def test_integrated_identifier_tokens_deduplicate_case_variants(
     )
     assert published.manifest_path.is_file()
     assert legacy_record["identifier_tokens"][-2:] == ["LOT NO.", "Lot No."]
+
+
+def test_quartz_resume_accepts_citation_pr_order_emitted_by_integration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _write_repeated_prs_in_different_order(
+        tmp_path / "repeated-pr-order.pptx"
+    )
+    _install_fake_quartz(monkeypatch)
+
+    result = run_collection(
+        [source],
+        tmp_path / "collection",
+        semantic_backend=_ScriptedBackend(),
+        integration_backend=_ScriptedBackend(),
+        config=CollectionConfig(
+            semantic=SemanticConfig(
+                coverage_policy="selected",
+                discover_topics=False,
+                repair_attempts=0,
+            ),
+            integration=IntegrationConfig(repair_attempts=0),
+        ),
+    )
+
+    source_map = [
+        json.loads(line)
+        for line in result.integrated.source_map_path.read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip()
+    ]
+    reversed_record = next(
+        record
+        for record in source_map
+        if record["pr_variants"] == ["PR 00456", "PR 00123"]
+    )
+    assert result.sources[0].pr_numbers == ("PR-00123", "PR 00456")
+    assert reversed_record["pr_numbers"] == ["PR 00456", "PR-00123"]
+
+    published = publish_quartz(
+        result.output_dir,
+        result.integrated.output_dir,
+        tmp_path / "resumed-quartz",
+        site_title="Repeated PR Order Test Wiki",
+    )
+    assert published.manifest_path.is_file()
 
 
 def test_quartz_rejects_tampered_collection_image_asset(

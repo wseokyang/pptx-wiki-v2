@@ -1227,13 +1227,19 @@ def _parse_source_map(
         )
         if pr_variants != expected_variants:
             raise ValueError(f"{label} citation-level PR variant inventory mismatch")
-        variant_keys = {
-            canonical_pr_number(value) for value in expected_variants
+        # Integration emits citation-level PRs in the citation's local
+        # first-seen order, while using the source inventory only to select
+        # each canonical display spelling.  A citation may therefore contain
+        # the same PR set in a different order from the source-wide ledger.
+        canonical_display = {
+            canonical_pr_number(value): value
+            for value in sources[source_id].pr_numbers
         }
         expected_prs = tuple(
-            value
-            for value in sources[source_id].pr_numbers
-            if canonical_pr_number(value) in variant_keys
+            dict.fromkeys(
+                canonical_display[canonical_pr_number(value)]
+                for value in expected_variants
+            )
         )
         if pr_numbers != expected_prs:
             raise ValueError(f"{label} citation-level PR inventory mismatch")
