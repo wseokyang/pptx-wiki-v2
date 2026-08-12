@@ -20,7 +20,7 @@ from pptx_wiki.integration import (
     QUALIFIED_CITATION_RE,
     validate_integrated_artifact,
 )
-from pptx_wiki.pipeline import run_pipeline
+from pptx_wiki.pipeline import PipelineConfig, run_pipeline
 from pptx_wiki.quartz_publish import publish_quartz
 from pptx_wiki.semantic import SemanticConfig
 from pptx_wiki.source_semantic import (
@@ -219,6 +219,69 @@ class _ScriptedBackend:
                 pr_number = f"{pr_number}-A"
             return f"# Reliability result\n\n- {pr_number} result is recorded. {citation}"
         raise AssertionError(f"unexpected backend prompt: {prompt[:120]}")
+
+
+class _EntityRetryBackend(_ScriptedBackend):
+    """Return a filtered PR entity first, then a grounded non-PR entity."""
+
+    def complete(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        max_tokens: int,
+        temperature: float,
+    ) -> str:
+        prompt = messages[-1]["content"]
+        if "COLLECTION_ENTITY_ONLY_RETRY" in prompt:
+            self.calls.append("integration-entity-retry")
+            citation = _matches(QUALIFIED_CITATION_RE, _allowed_line(prompt))[0]
+            return json.dumps(
+                {
+                    "entities": [
+                        {
+                            "name": "Reliability evaluation",
+                            "type": "concept",
+                            "description": (
+                                f"Reliability evaluation source concept {citation}"
+                            ),
+                            "aliases": [],
+                            "citations": [citation],
+                        }
+                    ]
+                }
+            )
+        if "Write one concise wiki page" in prompt:
+            self.calls.append("source-page")
+            citation = _matches(_LOCAL_CITATION_RE, _allowed_line(prompt))[0]
+            pr_number = _matches(_PR_RE, prompt)[0]
+            return (
+                "# Reliability evaluation\n\n"
+                f"- {pr_number} reliability evaluation passed. {citation}"
+            )
+        return super().complete(
+            messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+
+class _EmptyEntityRetryBackend(_EntityRetryBackend):
+    def complete(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        max_tokens: int,
+        temperature: float,
+    ) -> str:
+        prompt = messages[-1]["content"]
+        if "COLLECTION_ENTITY_ONLY_RETRY" in prompt:
+            self.calls.append("integration-entity-retry")
+            return json.dumps({"entities": []})
+        return super().complete(
+            messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
 
 
 def _install_fake_quartz(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -565,6 +628,95 @@ def test_integrated_identifier_tokens_do_not_cross_line_boundaries(
     assert all("\r" not in token and "\n" not in token for token in tokens)
 
 
+def test_integration_retries_llm_when_initial_entity_candidates_filter_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _write_pptx(
+        tmp_path / "fallback-entity.pptx",
+        pr_number="PR-00123",
+        result="passed",
+    )
+    _install_fake_quartz(monkeypatch)
+    backend = _EntityRetryBackend()
+    result = run_collection(
+        [source],
+        tmp_path / "entity-retry",
+        semantic_backend=backend,
+        integration_backend=backend,
+        config=CollectionConfig(
+            semantic=SemanticConfig(
+                coverage_policy="selected",
+                discover_topics=False,
+                repair_attempts=0,
+            ),
+            integration=IntegrationConfig(repair_attempts=0),
+        ),
+    )
+    entities = validate_integrated_artifact(result.integrated.output_dir)[
+        "entities.jsonl"
+    ]
+
+    # Initial discovery proposes only the protected PR identifier. The second
+    # LLM call must be entity-only and accept an exact-visible non-PR concept.
+    assert backend.calls.count("integration-discovery") == 1
+    assert backend.calls.count("integration-entity-retry") == 1
+    entity = next(
+        entity
+        for entity in entities
+        if entity["canonical_name"].casefold() == "reliability evaluation"
+    )
+    assert entity["type"] == "concept"
+    assert entity["citations"]
+    assert entity["source_ids"] == [result.sources[0].source_id]
+    assert entity["pr_numbers"] == ["PR-00123"]
+
+    published = publish_quartz(
+        result.output_dir,
+        result.integrated.output_dir,
+        tmp_path / "entity-retry-quartz",
+        site_title="Entity Retry Test Wiki",
+    )
+    assert published.entity_count == 1
+    entity_page = published.content_dir / "entities" / f"{entity['id']}.md"
+    assert entity_page.is_file()
+    assert "Reliability evaluation" in entity_page.read_text(encoding="utf-8")
+
+
+def test_integration_warns_when_entity_only_llm_retry_is_still_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _write_pptx(
+        tmp_path / "empty-entity-retry.pptx",
+        pr_number="PR-00123",
+        result="passed",
+    )
+    _install_fake_quartz(monkeypatch)
+    backend = _EmptyEntityRetryBackend()
+
+    result = run_collection(
+        [source],
+        tmp_path / "empty-entity-retry",
+        semantic_backend=backend,
+        integration_backend=backend,
+        config=CollectionConfig(
+            semantic=SemanticConfig(
+                coverage_policy="selected",
+                discover_topics=False,
+                repair_attempts=0,
+            ),
+            integration=IntegrationConfig(repair_attempts=0),
+        ),
+    )
+
+    assert backend.calls.count("integration-entity-retry") == 1
+    assert result.integrated.entity_count == 0
+    assert any(
+        "entity" in warning.casefold()
+        and any(word in warning.casefold() for word in ("empty", "retry", "usable"))
+        for warning in result.integrated.warnings
+    )
+
+
 def test_integrated_identifier_tokens_deduplicate_case_variants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -677,6 +829,66 @@ def test_quartz_resume_accepts_citation_pr_order_emitted_by_integration(
     assert published.manifest_path.is_file()
 
 
+def test_default_collection_omits_pictures_from_parsed_semantic_and_quartz(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _write_pptx_with_image(
+        tmp_path / "ignored-picture.pptx", tmp_path / "source-image.png"
+    )
+    _install_fake_quartz(monkeypatch)
+    backend = _ScriptedBackend()
+    result = run_collection(
+        [source],
+        tmp_path / "collection-without-pictures",
+        semantic_backend=backend,
+        integration_backend=backend,
+        config=CollectionConfig(
+            semantic=SemanticConfig(
+                coverage_policy="complete",
+                discover_topics=False,
+                repair_attempts=0,
+            ),
+            integration=IntegrationConfig(repair_attempts=0),
+        ),
+    )
+
+    parsed = result.sources[0].parsed
+    provenance = load_provenance(parsed.corpus.provenance_path)
+    assert not any(
+        record["kind"] in {"image", "picture", "ocr_table", "ocr_text"}
+        or record["asset_path"]
+        for record in provenance
+    )
+    assert not list((parsed.parsed_dir / "source-assets" / "images").glob("*"))
+    parsed_markdown = "\n".join(
+        path.read_text(encoding="utf-8") for path in parsed.corpus.slide_paths
+    )
+    semantic_markdown = result.sources[0].semantic.markdown_path.read_text(
+        encoding="utf-8"
+    )
+    assert "![" not in parsed_markdown
+    assert "<img" not in parsed_markdown.casefold()
+    assert "![" not in semantic_markdown
+    assert "<img" not in semantic_markdown.casefold()
+
+    published = publish_quartz(
+        result.output_dir,
+        result.integrated.output_dir,
+        tmp_path / "quartz-without-pictures",
+        site_title="Text-only Test Wiki",
+    )
+    assert published.asset_paths == ()
+    assert not (published.content_dir / "assets").exists()
+    quartz_manifest = json.loads(
+        published.manifest_path.read_text(encoding="utf-8")
+    )
+    assert quartz_manifest["asset_count"] == 0
+    for markdown_path in published.content_dir.rglob("*.md"):
+        markdown = markdown_path.read_text(encoding="utf-8")
+        assert "![" not in markdown
+        assert "<img" not in markdown.casefold()
+
+
 def test_quartz_rejects_tampered_collection_image_asset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -691,6 +903,7 @@ def test_quartz_rejects_tampered_collection_image_asset(
         semantic_backend=backend,
         integration_backend=backend,
         config=CollectionConfig(
+            pipeline=PipelineConfig(include_images=True),
             semantic=SemanticConfig(
                 coverage_policy="complete",
                 discover_topics=False,

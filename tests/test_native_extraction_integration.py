@@ -16,7 +16,9 @@ def _output_bytes(root: Path) -> dict[str, bytes]:
 
 def test_extract_keeps_adjacent_native_tables_and_merged_cells(complex_pptx, tmp_path: Path) -> None:
     path, spec = complex_pptx
-    deck = extract_pptx(path, assets_dir=tmp_path / "assets")
+    deck = extract_pptx(
+        path, assets_dir=tmp_path / "assets", include_images=True
+    )
     slide = deck.slides[0]
     by_name = {element.name: element for element in slide.elements}
 
@@ -43,16 +45,21 @@ def test_extract_keeps_adjacent_native_tables_and_merged_cells(complex_pptx, tmp
     assert (1, 0) not in cells_b  # covered by B's vertical merge
 
 
-def test_extract_preserves_image_and_group_boundaries(complex_pptx, tmp_path: Path) -> None:
+def test_extract_ignores_embedded_pictures_and_preserves_group_boundaries(
+    complex_pptx, tmp_path: Path
+) -> None:
     path, spec = complex_pptx
-    deck = extract_pptx(path, assets_dir=tmp_path / "assets")
+    assets_dir = tmp_path / "assets"
+    deck = extract_pptx(path, assets_dir=assets_dir)
     by_name = {element.name: element for element in deck.slides[0].elements}
 
-    picture = by_name[spec.image_table_name]
-    assert picture.kind == "image"
-    assert picture.metadata["ocr_policy"] == "rendered_roi"
-    assert picture.metadata["native_boundary_authoritative"] is True
-    assert picture.asset_path is not None and Path(picture.asset_path).is_file()
+    assert spec.image_table_name not in by_name
+    assert not any(
+        element.kind in {"image", "picture"}
+        for slide in deck.slides
+        for element in slide.elements
+    )
+    assert not list((assets_dir / "images").glob("*"))
 
     group = by_name[spec.group_name]
     children = [element for element in deck.slides[0].elements if element.parent_id == group.id]
@@ -71,16 +78,19 @@ def test_fixture_extract_to_wiki_is_stable_and_never_joins_tables(complex_pptx, 
     slide_markdown = first.slide_paths[0].read_text(encoding="utf-8")
     assert slide_markdown.count("<!-- BEGIN TABLE") == 2
     assert slide_markdown.count("<!-- END TABLE") == 2
+    assert "![" not in slide_markdown
+    assert "<img" not in slide_markdown.casefold()
     assert "표 A — 국내 매출" in slide_markdown
     assert "제품" in slide_markdown
     assert "표 B" in slide_markdown
     assert "93.2%" in slide_markdown
 
-    table_records = [
-        record
-        for record in load_provenance(first.provenance_path)
-        if record["kind"] == "table"
-    ]
+    provenance = load_provenance(first.provenance_path)
+    assert not any(
+        record["kind"] in {"image", "picture"} or record["asset_path"]
+        for record in provenance
+    )
+    table_records = [record for record in provenance if record["kind"] == "table"]
     assert [record["name"] for record in table_records] == [
         "NATIVE_TABLE_A",
         "NATIVE_TABLE_B",

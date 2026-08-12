@@ -523,6 +523,7 @@ def extract_pptx(
     path: str | Path,
     *,
     assets_dir: str | Path | None = None,
+    include_images: bool = False,
     include_empty_shapes: bool = False,
     strict: bool = False,
 ) -> DeckRecord:
@@ -539,6 +540,9 @@ def extract_pptx(
         assets_dir: Optional directory for lossless extraction of embedded image
             blobs. OCR should still use a rendered slide crop when PowerPoint
             crop/rotation/overlays matter.
+        include_images: Include embedded picture shapes and extract their image
+            assets. Disabled by default so decorative screenshots/logos do not
+            enter the parsed evidence corpus or OCR/VL stages.
         include_empty_shapes: Include decorative shapes without native text.
         strict: Raise on the first malformed/unsupported shape. By default the
             extractor records a warning and continues with the remaining slide.
@@ -553,6 +557,7 @@ def extract_pptx(
     slide_height = int(presentation.slide_height)
     warnings: list[dict[str, Any]] = []
     slides: list[SlideRecord] = []
+    ignored_image_count = 0
 
     for slide_number, slide in enumerate(presentation.slides, start=1):
         elements: list[Element] = []
@@ -568,13 +573,16 @@ def extract_pptx(
             _slide_number: int = slide_number,
             _elements: list[Element] = elements,
         ) -> None:
-            nonlocal next_z_index
+            nonlocal next_z_index, ignored_image_count
             shape_id = _int_or_zero(getattr(shape, "shape_id", 0))
             path_token = ".".join(f"{index:03d}" for index in z_path)
             element_id = f"s{_slide_number:04d}-p{path_token}-id{shape_id}"
             try:
                 matrix, bbox, transform_metadata = _shape_transform(shape, parent_matrix)
                 kind = _shape_kind(shape)
+                if kind == "image" and not include_images:
+                    ignored_image_count += 1
+                    return
                 nonvisual_metadata = _shape_nonvisual_metadata(shape)
                 own_hidden = bool(nonvisual_metadata.get("hidden", False))
                 effective_hidden = ancestor_hidden or own_hidden
@@ -705,5 +713,7 @@ def extract_pptx(
             "core_properties": _core_properties(presentation),
             "warnings": warnings,
             "warning_count": len(warnings),
+            "include_images": include_images,
+            "ignored_image_count": ignored_image_count,
         },
     )

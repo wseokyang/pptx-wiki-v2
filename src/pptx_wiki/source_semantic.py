@@ -368,7 +368,8 @@ def build_source_semantic(
     if not ledger:
         raise ValueError(
             f"PR 번호를 찾지 못했습니다: {identity.source_name}; "
-            "PR 번호가 이미지에만 있으면 OCR/VL 단계를 활성화하세요"
+            "이미지 안의 PR은 기본적으로 무시됩니다; 네이티브 텍스트/표에 PR을 "
+            "넣거나 extraction.include_images=true로 명시적으로 허용하세요"
         )
     detected_prs = _ordered_pr_values(ledger)
     if identity.pr_numbers:

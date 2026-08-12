@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from pptx_wiki.integration import validate_integrated_markdown
 from pptx_wiki.models import BBox, DeckRecord, Element, SlideRecord, TableCell, TableData
 from pptx_wiki.synthesis import (
     GroundingError,
@@ -93,6 +94,27 @@ def test_numeric_grounding_rejects_llm_arithmetic() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "image_markup",
+    (
+        "![external](https://example.test/result.png)",
+        '<img src="https://example.test/result.png" alt="external">',
+    ),
+)
+def test_integrated_markdown_rejects_model_authored_images(
+    image_markup: str,
+) -> None:
+    citation = "[@deck-a/slide-1#text-1]"
+
+    with pytest.raises(GroundingError, match="image markup is not allowed"):
+        validate_integrated_markdown(
+            f"- Reliability result {image_markup} {citation}",
+            {citation},
+            numeric_evidence="Reliability result",
+            accepted_pr_numbers=(),
+        )
+
+
 class _UngroundedBackend:
     def complete(self, messages, *, max_tokens: int, temperature: float) -> str:
         prompt = messages[-1]["content"]
@@ -144,3 +166,73 @@ def test_synthesis_falls_back_to_verbatim_on_ungrounded_number(tmp_path: Path) -
     assert "매출은 100입니다." in page
     assert "999" not in page
     assert "[slide-1#text-1]" in page
+
+
+class _ExternalImageBackend:
+    def __init__(self) -> None:
+        self.generation_calls = 0
+
+    def complete(self, messages, *, max_tokens: int, temperature: float) -> str:
+        prompt = messages[-1]["content"]
+        if "Return JSON only" in prompt:
+            return json.dumps(
+                {
+                    "topics": [
+                        {
+                            "title": "Reliability result",
+                            "citations": ["[slide-1#text-1]"],
+                        }
+                    ]
+                }
+            )
+        self.generation_calls += 1
+        return (
+            "# Reliability result\n\n"
+            "- Result passed. ![screenshot](https://example.test/result.png) "
+            "[slide-1#text-1]"
+        )
+
+
+def test_synthesis_repairs_then_falls_back_when_llm_emits_external_image(
+    tmp_path: Path,
+) -> None:
+    deck = DeckRecord(
+        source_path="sample.pptx",
+        slide_width=1_000,
+        slide_height=1_000,
+        slides=[
+            SlideRecord(
+                number=1,
+                width=1_000,
+                height=1_000,
+                title="Reliability result",
+                elements=[
+                    Element(
+                        id="text-1",
+                        slide_number=1,
+                        kind="text",
+                        bbox=BBox(0, 0, 500, 100),
+                        z_index=0,
+                        text="Reliability result passed.",
+                    )
+                ],
+            )
+        ],
+    )
+    corpus = export_slide_corpus(deck, tmp_path / "image-corpus")
+    backend = _ExternalImageBackend()
+
+    result = synthesize_wiki(
+        corpus.output_dir,
+        backend=backend,
+        output_dir=tmp_path / "image-synthesis",
+        config=SynthesisConfig(repair_attempts=1),
+    )
+
+    assert backend.generation_calls == 2
+    assert result.fallback_pages
+    page = result.topic_paths[0].read_text(encoding="utf-8")
+    assert "Reliability result passed." in page
+    assert "![" not in page
+    assert "<img" not in page.casefold()
+    assert "example.test" not in page

@@ -100,6 +100,7 @@ class RenderSettings:
 
 @dataclass(frozen=True, slots=True)
 class ExtractionSettings:
+    include_images: bool = False
     include_empty_shapes: bool = False
     strict: bool = False
 
@@ -203,6 +204,10 @@ class SemanticSettings:
     max_topics: int = 64
     repair_attempts: int = 2
     discover_topics: bool = True
+    kg_profile: Literal["none", "semiconductor_reliability"] = (
+        "semiconductor_reliability"
+    )
+    max_relationships: int = 512
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,8 +337,16 @@ def load_config(path: str | Path) -> AppConfig:
     )
 
     extraction_value = _section(root, "extraction")
-    _check_keys(extraction_value, {"include_empty_shapes", "strict"}, "extraction")
+    _check_keys(
+        extraction_value,
+        {"include_images", "include_empty_shapes", "strict"},
+        "extraction",
+    )
     extraction = ExtractionSettings(
+        include_images=_boolean(
+            extraction_value.get("include_images", False),
+            "extraction.include_images",
+        ),
         include_empty_shapes=_boolean(
             extraction_value.get("include_empty_shapes", False), "extraction.include_empty_shapes"
         ),
@@ -517,6 +530,8 @@ def load_config(path: str | Path) -> AppConfig:
                 "max_topics",
                 "repair_attempts",
                 "discover_topics",
+                "kg_profile",
+                "max_relationships",
             },
             "wiki",
         )
@@ -545,6 +560,8 @@ def load_config(path: str | Path) -> AppConfig:
                 "max_topics",
                 "repair_attempts",
                 "discover_topics",
+                "kg_profile",
+                "max_relationships",
             },
             "semantic",
         )
@@ -632,6 +649,17 @@ def _semantic_settings(
         ),
         discover_topics=_boolean(
             value.get("discover_topics", True), f"{label}.discover_topics"
+        ),
+        kg_profile=_choice(
+            value.get("kg_profile", "semiconductor_reliability"),
+            {"none", "semiconductor_reliability"},
+            f"{label}.kg_profile",
+        ),  # type: ignore[arg-type]
+        max_relationships=_integer(
+            value.get("max_relationships", 512),
+            f"{label}.max_relationships",
+            minimum=1,
+            maximum=4096,
         ),
     )
 

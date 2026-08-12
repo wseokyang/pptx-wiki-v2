@@ -108,6 +108,11 @@ def _add_parse_arguments(parser: argparse.ArgumentParser, *, include_semantic: b
     parser.add_argument("--render-backend", choices=("auto", "powerpoint", "libreoffice"), default="auto")
     parser.add_argument("--source-padding-ratio", type=float, default=0.002)
     parser.add_argument("--model-padding-px", type=int, default=24)
+    parser.add_argument(
+        "--include-images",
+        action="store_true",
+        help="opt in to embedded picture extraction (disabled by default)",
+    )
     parser.add_argument("--include-empty-shapes", action="store_true")
     parser.add_argument("--strict-extraction", action="store_true")
     parser.add_argument("--strict-ocr", action="store_true")
@@ -269,6 +274,7 @@ def _run_parse(args: argparse.Namespace, *, continue_to_wiki: bool) -> int:
             dpi=args.dpi,
             source_padding_ratio=args.source_padding_ratio,
             model_padding_px=args.model_padding_px,
+            include_images=args.include_images,
             include_empty_shapes=args.include_empty_shapes,
             strict_extraction=args.strict_extraction,
             strict_ocr=args.strict_ocr,
@@ -374,6 +380,9 @@ def _quartz(args: argparse.Namespace) -> int:
                 "content_dir": str(result.content_dir),
                 "pages": result.page_count,
                 "prs": result.pr_count,
+                "entities": result.entity_count,
+                "relationships": getattr(result, "relationship_count", 0),
+                "assets": len(result.asset_paths),
             },
             ensure_ascii=False,
             indent=2,
@@ -393,6 +402,7 @@ def _convert(args: argparse.Namespace) -> int:
         "input": str(source),
         "output": str(output),
         "render": {"backend": config.render.backend, "dpi": config.render.dpi},
+        "extraction": {"include_images": config.extraction.include_images},
         "ocr": {
             "enabled": config.ocr.enabled,
             "backend": config.ocr.backend,
@@ -427,6 +437,7 @@ def _collection(args: argparse.Namespace) -> int:
         "inputs": [str(value.expanduser().resolve()) for value in args.input],
         "recursive": bool(args.recursive),
         "output": str(output),
+        "extraction": {"include_images": config.extraction.include_images},
         "ocr": {
             "enabled": config.ocr.enabled,
             "backend": config.ocr.backend,
@@ -440,6 +451,8 @@ def _collection(args: argparse.Namespace) -> int:
             "goal": config.semantic.goal or DEFAULT_COLLECTION_GOAL,
             "coverage_policy": config.semantic.coverage_policy,
             "model": config.llm_api.model,
+            "kg_profile": config.semantic.kg_profile,
+            "max_relationships": config.semantic.max_relationships,
         },
         "quartz": {"site_title": args.site_title},
     }
@@ -463,6 +476,7 @@ def _collection(args: argparse.Namespace) -> int:
         "parsed_slides": sum(source.parsed.corpus.slide_count for source in result.sources),
         "semantic_markdown_files": len(result.sources),
         "entities": result.integrated.entity_count,
+        "relationships": result.integrated.relationship_count,
         "integrated_pages": result.integrated.page_count,
         "quartz_pages": result.quartz.page_count,
         "quartz_content": str(result.quartz.content_dir),

@@ -114,7 +114,9 @@ def test_version_2_loads_semantic_settings_separately_from_wiki(tmp_path: Path) 
   max_output_tokens: 3072
   max_topics: 20
   repair_attempts: 3
-  discover_topics: false""",
+  discover_topics: false
+  kg_profile: none
+  max_relationships: 128""",
     )
 
     config = load_config(_write(tmp_path, value))
@@ -127,6 +129,8 @@ def test_version_2_loads_semantic_settings_separately_from_wiki(tmp_path: Path) 
     assert config.semantic.max_topics == 20
     assert config.semantic.repair_attempts == 3
     assert config.semantic.discover_topics is False
+    assert config.semantic.kg_profile == "none"
+    assert config.semantic.max_relationships == 128
     assert config.wiki.enabled is True
     assert config.warnings == ()
 
@@ -179,6 +183,24 @@ def test_version_2_rejects_unknown_coverage_policy(tmp_path: Path) -> None:
         "semantic:\n  enabled: false\n  coverage_policy: partial",
     )
     with pytest.raises(ValueError, match="semantic.coverage_policy must be one of"):
+        load_config(_write(tmp_path, value))
+
+
+def test_version_2_rejects_unknown_kg_profile(tmp_path: Path) -> None:
+    value = _v2_yaml(semantic_enabled=False, wiki_enabled=False).replace(
+        "semantic:\n  enabled: false",
+        "semantic:\n  enabled: false\n  kg_profile: generic_guessing",
+    )
+    with pytest.raises(ValueError, match="semantic.kg_profile must be one of"):
+        load_config(_write(tmp_path, value))
+
+
+def test_version_2_rejects_unbounded_relationship_inventory(tmp_path: Path) -> None:
+    value = _v2_yaml(semantic_enabled=False, wiki_enabled=False).replace(
+        "semantic:\n  enabled: false",
+        "semantic:\n  enabled: false\n  max_relationships: 4097",
+    )
+    with pytest.raises(ValueError, match="semantic.max_relationships must be at most 4096"):
         load_config(_write(tmp_path, value))
 
 

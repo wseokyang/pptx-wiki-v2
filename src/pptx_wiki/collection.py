@@ -39,9 +39,10 @@ from .wiki_output import load_provenance
 
 COLLECTION_SCHEMA_VERSION = "pptx-wiki.collection.v1"
 DEFAULT_COLLECTION_GOAL = (
-    "신뢰성 의뢰·분석 결과에 직접 관련된 PR 번호, 대상/시료, 조건, 방법, 결과, "
-    "이상, 원인, 결론, 조치만 보존하고 PPT 작성 가이드, 템플릿, 샘플 문구, "
-    "무관한 예시와 반복 boilerplate는 제거합니다. PR 번호는 원문 그대로 보존합니다."
+    "반도체 패키지 신뢰성 의뢰·분석 결과에 직접 관련된 PR 번호, 제품·패키지, "
+    "시료·Lot, 시험 방법·조건·표준·장비, 측정·관찰 결과, 불량 모드, 원인 판단, "
+    "결론과 후속 조치만 보존하고 PPT 작성 가이드, 템플릿, 샘플 문구, 무관한 "
+    "예시와 반복 boilerplate는 제거합니다. PR 번호는 원문 그대로 보존합니다."
 )
 
 
@@ -291,7 +292,8 @@ def run_collection(
             raise ValueError(
                 "PR 번호를 찾지 못한 PPTX가 있습니다: "
                 + ", ".join(missing_pr_sources)
-                + ". 이미지에만 있으면 OCR/VL을 활성화하세요"
+                + ". 이미지 안의 PR은 기본적으로 무시됩니다; 네이티브 텍스트/표에 "
+                "PR을 넣거나 extraction.include_images=true로 명시적으로 허용하세요"
             )
 
         for item in pending:
@@ -347,7 +349,7 @@ def run_collection(
         )
         results = tuple(_source_result(item) for item in pending)
         all_prs = _all_pr_numbers(results)
-        _write_deliverables_readme(destination, results)
+        _write_deliverables_readme(destination, results, integrated)
         _write_collection_manifest(
             manifest_path,
             status="success",
@@ -752,6 +754,7 @@ def _write_collection_manifest(
             "manifest": integrated.manifest_path.relative_to(path.parent).as_posix(),
             "manifest_sha256": sha256(integrated.manifest_path.read_bytes()).hexdigest(),
             "entity_count": integrated.entity_count,
+            "relationship_count": integrated.relationship_count,
             "page_count": integrated.page_count,
         }
     if quartz is not None:
@@ -769,6 +772,11 @@ def _write_collection_manifest(
                 "readme_sha256": sha256(readme_path.read_bytes()).hexdigest(),
                 "parsed": "sources/<source-id>/parsed/corpus/slides/*.md",
                 "semantic": "sources/<source-id>/semantic/semantic.md",
+                "knowledge_graph": (
+                    "integrated/entities.jsonl + integrated/relationships.jsonl"
+                    if integrated.relationships_path is not None
+                    else "integrated/entities.jsonl"
+                ),
                 "quartz_content": "quartz/content",
             }
     if error is not None:
@@ -800,6 +808,7 @@ def _file_sha256(path: Path) -> str:
 def _write_deliverables_readme(
     destination: Path,
     sources: Sequence[CollectionSourceResult],
+    integrated: IntegratedExport,
 ) -> None:
     lines = [
         "# PPTX collection deliverables",
@@ -818,6 +827,15 @@ def _write_deliverables_readme(
         label = " / ".join(source.pr_numbers)
         semantic = f"sources/{source.source_id}/semantic/semantic.md"
         lines.append(f"- [{label} · semantic.md]({semantic})")
+    lines.extend(("", "## 검증된 Knowledge Graph", ""))
+    lines.append("- [KG nodes](integrated/entities.jsonl)")
+    if integrated.relationships_path is not None:
+        lines.append("- [KG relationships](integrated/relationships.jsonl)")
+        lines.append(
+            "- 모든 노드와 관계는 원본 evidence citation 및 PR lineage를 포함합니다."
+        )
+    else:
+        lines.append("- `kg_profile: none`이므로 relationship edge는 생성하지 않았습니다.")
     lines.extend(
         (
             "",

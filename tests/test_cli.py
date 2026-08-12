@@ -172,6 +172,9 @@ def test_cli_quartz_dispatches_without_loading_config_or_collection_pipeline(
             content_dir=output_dir / "content",
             page_count=7,
             pr_count=2,
+            entity_count=3,
+            relationship_count=4,
+            asset_paths=(),
         )
 
     monkeypatch.setattr(cli_module, "load_config", forbidden)
@@ -204,6 +207,9 @@ def test_cli_quartz_dispatches_without_loading_config_or_collection_pipeline(
         "content_dir": str(output.resolve() / "content"),
         "pages": 7,
         "prs": 2,
+        "entities": 3,
+        "relationships": 4,
+        "assets": 0,
     }
 
 

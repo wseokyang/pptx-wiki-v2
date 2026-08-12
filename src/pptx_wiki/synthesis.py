@@ -24,6 +24,12 @@ from .wiki_output import load_provenance
 
 
 CITATION_RE = re.compile(r"\[slide-(?P<slide>\d+)#(?P<element>[^\]\s#]+)\]")
+_MARKDOWN_IMAGE_RE = re.compile(
+    r"(?<!\\)!\[(?:\\.|[^\]])*\](?:\([^\n)]*\)|\[[^\]\n]*\])"
+)
+_HTML_IMAGE_RE = re.compile(
+    r"<\s*/?\s*(?:img|picture|source|svg)\b", re.IGNORECASE
+)
 NUMBER_RE = re.compile(
     r"(?<!\d)[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[%％])?"
 )
@@ -278,6 +284,12 @@ def validate_grounded_markdown(
         errors.append("unknown citations: " + ", ".join(unknown))
     if not found:
         errors.append("no citations were emitted")
+    if (
+        _MARKDOWN_IMAGE_RE.search(markdown)
+        or "![[" in markdown
+        or _HTML_IMAGE_RE.search(markdown)
+    ):
+        errors.append("image markup is not allowed")
 
     if numeric_evidence is not None:
         allowed_numbers = _numeric_tokens(numeric_evidence)

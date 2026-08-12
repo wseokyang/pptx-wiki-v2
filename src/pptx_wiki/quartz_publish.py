@@ -23,7 +23,12 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
-from .source_semantic import canonical_pr_number, load_source_semantic
+from .source_semantic import (
+    canonical_pr_number,
+    extract_pr_numbers,
+    find_pr_number_mutations,
+    load_source_semantic,
+)
 
 QUARTZ_SCHEMA_VERSION = "pptx-wiki.quartz.v1"
 INTEGRATED_SCHEMA_VERSION = "pptx-wiki.integrated.v1"
@@ -35,6 +40,7 @@ _INTEGRATED_FILES = (
     "pages.jsonl",
     "coverage.jsonl",
 )
+_OPTIONAL_INTEGRATED_FILES = ("relationships.jsonl",)
 _DIGEST_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _QUALIFIED_CITATION_RE = re.compile(
@@ -51,6 +57,20 @@ _ANCHOR_RE = re.compile(
 _INLINE_LINK_RE = re.compile(
     r"(?P<image>!)?\[(?P<label>(?:\\.|[^\]])*)\]"
     r"\((?P<target>[^)\n]+)\)"
+)
+_REFERENCE_IMAGE_RE = re.compile(
+    r"(?<!\\)!\[(?:\\.|[^\]])*\]\[[^\]\n]*\]"
+)
+_REFERENCE_IMAGE_USAGE_RE = re.compile(
+    r"(?<!\\)!\[(?P<alt>(?:\\.|[^\]])*)\]\[(?P<label>[^\]\n]*)\]"
+)
+_REFERENCE_DEFINITION_RE = re.compile(
+    r"^(?P<indent>\s{0,3})\[(?P<label>[^\]\r\n]+)\]:\s*"
+    r"(?P<target><[^>\r\n]+>|\S+)(?P<rest>[^\r\n]*)$",
+    re.MULTILINE,
+)
+_HTML_IMAGE_RE = re.compile(
+    r"<\s*/?\s*(?:img|picture|source|svg)\b", re.IGNORECASE
 )
 _REFERENCE_LINK_RE = re.compile(
     r"^(?P<prefix>\s{0,3}\[[^\]\r\n]+\]:\s*)"
@@ -88,6 +108,36 @@ _ENTITY_TYPES = {
     "concept",
     "metric",
     "other",
+    "sample",
+    "lot",
+    "device",
+    "package",
+    "material",
+    "process",
+    "test_method",
+    "test_condition",
+    "equipment",
+    "failure_mode",
+    "defect",
+    "standard",
+    "corrective_action",
+}
+_RELATIONSHIP_PREDICATES = {
+    "has_sample",
+    "has_lot",
+    "targets_device",
+    "uses_package",
+    "uses_material",
+    "underwent_test",
+    "uses_condition",
+    "uses_equipment",
+    "observed_failure",
+    "observed_defect",
+    "suspected_cause",
+    "concluded_cause",
+    "recommends_action",
+    "compared_with",
+    "related_to",
 }
 _OUTPUT_DIRECTORIES = (
     "content",
@@ -96,7 +146,6 @@ _OUTPUT_DIRECTORIES = (
     "content/prs",
     "content/sources",
     "content/evidence",
-    "content/assets",
 )
 
 
@@ -113,6 +162,7 @@ class QuartzExport:
     source_count: int
     entity_count: int
     pr_count: int
+    relationship_count: int = 0
 
     @property
     def report_path(self) -> Path:
@@ -155,6 +205,25 @@ class _Entity:
     entity_type: str
     canonical_name: str
     aliases: tuple[str, ...]
+    description: str
+    citations: tuple[str, ...]
+    source_ids: tuple[str, ...]
+    pr_numbers: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _Endpoint:
+    kind: str
+    node_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Relationship:
+    relationship_id: str
+    predicate: str
+    subject: _Endpoint
+    object: _Endpoint
+    assertion: str
     description: str
     citations: tuple[str, ...]
     source_ids: tuple[str, ...]
@@ -274,6 +343,9 @@ def publish_quartz(
     sources = _load_sources(collection, manifest)
     citations = _parse_source_map(artifacts["source-map.jsonl"], sources)
     entities = _parse_entities(artifacts["entities.jsonl"], citations, sources)
+    relationships = _parse_relationships(
+        artifacts["relationships.jsonl"], citations, entities, sources
+    )
     pages = _parse_pages(artifacts["pages.jsonl"], citations, entities, sources)
     coverage = _parse_coverage(
         artifacts["coverage.jsonl"], sources, pages, entities
@@ -286,6 +358,9 @@ def publish_quartz(
     citation_links = {
         token: _citation_wikilink(citation) for token, citation in citations.items()
     }
+    pr_slugs = _assign_pr_slugs(
+        {pr for source in sources.values() for pr in source.pr_numbers}
+    )
 
     for source_id in sorted(sources, key=_stable_key):
         source = sources[source_id]
@@ -299,6 +374,7 @@ def publish_quartz(
                 label=f"evidence slide {source_id}/{slide_number}",
                 allow_frontmatter=True,
             )
+            body = _strip_local_markdown_images(body)
             body = _replace_citations(
                 body,
                 citations,
@@ -331,6 +407,7 @@ def publish_quartz(
             label=f"semantic Markdown for {source_id}",
             allow_frontmatter=True,
         )
+        semantic_body = _strip_local_markdown_images(semantic_body)
         semantic_body = _replace_citations(
             semantic_body,
             citations,
@@ -365,7 +442,13 @@ def publish_quartz(
 
     for entity_id in sorted(entities, key=_stable_key):
         entity = entities[entity_id]
-        body = _render_entity_body(entity, citation_links)
+        body = _render_entity_body(
+            entity,
+            citation_links,
+            relationships=relationships,
+            entities=entities,
+            pr_slugs=pr_slugs,
+        )
         files.add_text(
             f"content/entities/{entity_id}.md",
             _render_markdown_page(
@@ -410,12 +493,17 @@ def publish_quartz(
             ),
         )
 
-    pr_slugs = _assign_pr_slugs(
-        {pr for source in sources.values() for pr in source.pr_numbers}
-    )
     for pr_number in sorted(pr_slugs, key=_stable_key):
         slug = pr_slugs[pr_number]
-        body = _render_pr_body(pr_number, sources, pages, entities)
+        body = _render_pr_body(
+            pr_number,
+            sources,
+            pages,
+            entities,
+            relationships,
+            citation_links,
+            pr_slugs,
+        )
         pr_sources = tuple(
             source_id
             for source_id in sorted(sources, key=_stable_key)
@@ -457,6 +545,7 @@ def publish_quartz(
         integrated_manifest_sha256=sha256(manifest_raw).hexdigest(),
         sources=sources,
         entities=entities,
+        relationships=relationships,
         pages=pages,
         pr_slugs=pr_slugs,
         files=files.values,
@@ -486,6 +575,7 @@ def publish_quartz(
         source_count=len(sources),
         entity_count=len(entities),
         pr_count=len(pr_slugs),
+        relationship_count=len(relationships),
     )
 
 
@@ -646,9 +736,13 @@ def _load_integrated_artifacts(
         loaded_raw[declared_name] = raw
         loaded_records[declared_name] = records
 
-    # The four contract files are fixed names.  Extra content-addressed JSONL
-    # audit files are accepted only after receiving the same hash/count checks.
-    return {name: loaded_records[name] for name in _INTEGRATED_FILES}
+    # The four original contract files remain mandatory. Relationships were
+    # added later and are therefore optional for resumable legacy artifacts,
+    # but receive the exact same hash/count checks whenever declared.
+    result = {name: loaded_records[name] for name in _INTEGRATED_FILES}
+    for name in _OPTIONAL_INTEGRATED_FILES:
+        result[name] = loaded_records.get(name, [])
+    return result
 
 
 def _load_sources(
@@ -1327,6 +1421,239 @@ def _parse_entities(
     return result
 
 
+def _parse_relationships(
+    records: Sequence[Mapping[str, Any]],
+    citations: Mapping[str, _Citation],
+    entities: Mapping[str, _Entity],
+    sources: Mapping[str, _Source],
+) -> dict[str, _Relationship]:
+    """Parse the optional domain KG edge inventory with strict lineage checks."""
+
+    result: dict[str, _Relationship] = {}
+    collision_keys: set[str] = set()
+    known_prs = {
+        pr_number
+        for source in sources.values()
+        for pr_number in source.pr_numbers
+    }
+    for index, value in enumerate(records):
+        label = f"relationships.jsonl line {index + 1}"
+        relationship_id = _safe_id(value.get("id"), f"{label}.id")
+        collision_key = unicodedata.normalize("NFC", relationship_id).casefold()
+        if collision_key in collision_keys:
+            raise ValueError(f"duplicate relationship id: {relationship_id}")
+        collision_keys.add(collision_key)
+
+        predicate = _one_line(value.get("predicate"), f"{label}.predicate")
+        if predicate not in _RELATIONSHIP_PREDICATES:
+            raise ValueError(
+                f"{label}.predicate must be one of: "
+                + ", ".join(sorted(_RELATIONSHIP_PREDICATES))
+            )
+        subject = _parse_relationship_endpoint(
+            value.get("subject"), f"{label}.subject", entities, known_prs
+        )
+        object_endpoint = _parse_relationship_endpoint(
+            value.get("object"), f"{label}.object", entities, known_prs
+        )
+        if subject == object_endpoint:
+            raise ValueError(f"{label} must not contain a self relationship")
+
+        assertion = _one_line(value.get("assertion"), f"{label}.assertion")
+        if len(assertion) > 1_000:
+            raise ValueError(f"{label}.assertion exceeds 1000 characters")
+        description = _one_line(value.get("description"), f"{label}.description")
+        if len(description) > 500:
+            raise ValueError(f"{label}.description exceeds 500 characters")
+        declared_citations = _string_tuple(
+            value.get("citations"), f"{label}.citations", nonempty=True
+        )
+        _validate_declared_citations(
+            declared_citations, citations, f"relationship {relationship_id}"
+        )
+        source_ids = _string_tuple(
+            value.get("source_ids"), f"{label}.source_ids", nonempty=True, ids=True
+        )
+        pr_numbers = _string_tuple(
+            value.get("pr_numbers"), f"{label}.pr_numbers", nonempty=True, pr=True
+        )
+        _validate_relationship_lineage(
+            declared_citations,
+            source_ids,
+            pr_numbers,
+            subject,
+            object_endpoint,
+            citations,
+            sources,
+            entities,
+            f"relationship {relationship_id}",
+        )
+        _validate_relationship_claim(
+            assertion,
+            description,
+            declared_citations,
+            citations,
+            f"relationship {relationship_id}",
+        )
+        result[relationship_id] = _Relationship(
+            relationship_id=relationship_id,
+            predicate=predicate,
+            subject=subject,
+            object=object_endpoint,
+            assertion=assertion,
+            description=description,
+            citations=declared_citations,
+            source_ids=source_ids,
+            pr_numbers=pr_numbers,
+        )
+    return result
+
+
+def _parse_relationship_endpoint(
+    value: Any,
+    label: str,
+    entities: Mapping[str, _Entity],
+    known_prs: set[str],
+) -> _Endpoint:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{label} must be an object")
+    if set(value) != {"kind", "id"}:
+        raise ValueError(f"{label} must contain exactly kind and id")
+    kind = _one_line(value.get("kind"), f"{label}.kind")
+    if kind == "entity":
+        node_id = _safe_id(value.get("id"), f"{label}.id")
+        if node_id not in entities:
+            raise ValueError(f"{label} references unknown entity endpoint: {node_id}")
+    elif kind == "pr":
+        node_id = _pr_number(value.get("id"), f"{label}.id")
+        if node_id not in known_prs:
+            raise ValueError(f"{label} references unknown PR endpoint: {node_id}")
+    else:
+        raise ValueError(f"{label}.kind must be 'pr' or 'entity'")
+    return _Endpoint(kind=kind, node_id=node_id)
+
+
+def _validate_relationship_lineage(
+    declared: Sequence[str],
+    source_ids: Sequence[str],
+    pr_numbers: Sequence[str],
+    subject: _Endpoint,
+    object_endpoint: _Endpoint,
+    citations: Mapping[str, _Citation],
+    sources: Mapping[str, _Source],
+    entities: Mapping[str, _Entity],
+    label: str,
+) -> None:
+    derived_sources = {citations[token].source_id for token in declared}
+    if set(source_ids) != derived_sources:
+        raise ValueError(
+            f"{label} source_ids do not match citation lineage: "
+            f"declared={sorted(source_ids)}, derived={sorted(derived_sources)}"
+        )
+
+    # Relationships are claims about specific evidence blocks. Unlike generic
+    # entity/page lineage, a deck-wide PR fallback would let an edge borrow a
+    # PR that never occurs in its cited evidence.
+    citation_prs = {
+        pr for token in declared for pr in citations[token].pr_numbers
+    }
+    endpoint_prs = {
+        endpoint.node_id
+        for endpoint in (subject, object_endpoint)
+        if endpoint.kind == "pr"
+    }
+    if not endpoint_prs <= citation_prs:
+        raise ValueError(
+            f"{label} PR endpoint is not supported by its citation lineage"
+        )
+    expected_prs = endpoint_prs or citation_prs
+    if set(pr_numbers) != expected_prs:
+        raise ValueError(
+            f"{label} PR inventory does not match its endpoints/citation lineage: "
+            f"declared={sorted(pr_numbers)}, derived={sorted(expected_prs)}"
+        )
+
+    for endpoint in (subject, object_endpoint):
+        if endpoint.kind != "entity":
+            continue
+        entity = entities[endpoint.node_id]
+        entity_sources = set(entity.source_ids)
+        if not derived_sources <= entity_sources:
+            raise ValueError(
+                f"{label} entity endpoint {endpoint.node_id!r} is outside "
+                "the relationship source lineage"
+            )
+        if not set(declared) & set(entity.citations):
+            raise ValueError(
+                f"{label} entity endpoint {endpoint.node_id!r} has no "
+                "citation in common with the relationship"
+            )
+
+
+def _validate_relationship_claim(
+    assertion: str,
+    description: str,
+    declared: Sequence[str],
+    citations: Mapping[str, _Citation],
+    label: str,
+) -> None:
+    claim = assertion + "\n" + description
+    _validate_body_citations(claim, declared, label)
+    _validate_no_dangerous_html(claim, label)
+    if (
+        any(match.group("image") for match in _INLINE_LINK_RE.finditer(claim))
+        or _REFERENCE_IMAGE_RE.search(claim)
+        or "![[" in claim
+        or _HTML_IMAGE_RE.search(claim)
+    ):
+        raise ValueError(f"{label} contains image markup")
+    if _WIKILINK_RE.search(claim):
+        raise ValueError(f"{label} contains model-authored wikilinks")
+
+    allowed_numbers = {
+        number for token in declared for number in citations[token].numeric_tokens
+    }
+    emitted_numbers = _numeric_tokens(claim)
+    ungrounded_numbers = sorted(emitted_numbers - allowed_numbers, key=_stable_key)
+    if ungrounded_numbers:
+        raise ValueError(
+            f"{label} contains ungrounded numeric token(s): "
+            + ", ".join(ungrounded_numbers)
+        )
+    accepted_pr_variants = tuple(
+        dict.fromkeys(
+            variant for token in declared for variant in citations[token].pr_variants
+        )
+    )
+    accepted_exact = {
+        unicodedata.normalize("NFC", value) for value in accepted_pr_variants
+    }
+    changed_prs = [
+        value
+        for value in extract_pr_numbers(claim)
+        if unicodedata.normalize("NFC", value) not in accepted_exact
+    ]
+    if changed_prs:
+        raise ValueError(
+            f"{label} contains changed or uncited PR number(s): "
+            + ", ".join(changed_prs)
+        )
+    mutations = find_pr_number_mutations(
+        claim,
+        accepted_pr_variants,
+        evidence_text=" ".join(
+            identifier
+            for token in declared
+            for identifier in citations[token].identifier_tokens
+        ),
+    )
+    if mutations:
+        raise ValueError(
+            f"{label} contains mutated PR-like token(s): "
+            + ", ".join(mutations)
+        )
+
+
 def _parse_pages(
     records: Sequence[Mapping[str, Any]],
     citations: Mapping[str, _Citation],
@@ -1702,6 +2029,62 @@ def _prepare_input_markdown(
     return text.strip()
 
 
+def _strip_local_markdown_images(markdown: str) -> str:
+    """Drop parsed local picture embeds while preserving fail-closed remote images.
+
+    Parsed evidence can contain authenticated image links when extraction was
+    explicitly opted in. The Quartz contract is text-only, so those local
+    embeds and their reference definitions are omitted instead of copied to
+    ``content/assets``. Remote, data, wikilink, and HTML image forms remain in
+    the document and are rejected by the existing link/final-tree validators.
+    """
+
+    image_reference_labels = {
+        unicodedata.normalize(
+            "NFC", match.group("label") or match.group("alt")
+        ).casefold()
+        for match in _REFERENCE_IMAGE_USAGE_RE.finditer(markdown)
+    }
+    local_reference_labels: set[str] = set()
+    for match in _REFERENCE_DEFINITION_RE.finditer(markdown):
+        label_key = unicodedata.normalize("NFC", match.group("label")).casefold()
+        raw_target = match.group("target")
+        target = raw_target[1:-1] if raw_target.startswith("<") else raw_target
+        if label_key in image_reference_labels and _is_local_markdown_target(target):
+            local_reference_labels.add(label_key)
+
+    def inline(match: re.Match[str]) -> str:
+        if not match.group("image"):
+            return match.group(0)
+        target, _ = _split_markdown_target(match.group("target"))
+        return "" if _is_local_markdown_target(target) else match.group(0)
+
+    value = _INLINE_LINK_RE.sub(inline, markdown)
+
+    def reference_image(match: re.Match[str]) -> str:
+        label = match.group("label") or match.group("alt")
+        key = unicodedata.normalize("NFC", label).casefold()
+        return "" if key in local_reference_labels else match.group(0)
+
+    value = _REFERENCE_IMAGE_USAGE_RE.sub(reference_image, value)
+
+    def reference_definition(match: re.Match[str]) -> str:
+        key = unicodedata.normalize("NFC", match.group("label")).casefold()
+        return "" if key in local_reference_labels else match.group(0)
+
+    return _REFERENCE_DEFINITION_RE.sub(reference_definition, value)
+
+
+def _is_local_markdown_target(target: str) -> bool:
+    value = html_unescape(target).strip()
+    if not value or value.startswith(("//", "\\\\", "#")):
+        return False
+    if PureWindowsPath(value).is_absolute() or re.match(r"^[A-Za-z]:[\\/]", value):
+        return True
+    parsed = urlsplit(value)
+    return not parsed.scheme and not Path(unquote(parsed.path)).is_absolute()
+
+
 def _rewrite_local_links(
     markdown: str,
     *,
@@ -1919,7 +2302,12 @@ def _with_heading(title: str, body: str) -> str:
 
 
 def _render_entity_body(
-    entity: _Entity, citation_links: Mapping[str, str]
+    entity: _Entity,
+    citation_links: Mapping[str, str],
+    *,
+    relationships: Mapping[str, _Relationship],
+    entities: Mapping[str, _Entity],
+    pr_slugs: Mapping[str, str],
 ) -> str:
     lines = [f"# {_escape_heading(entity.canonical_name)}", ""]
     description = entity.description
@@ -1939,6 +2327,15 @@ def _render_entity_body(
         lines.append("")
     lines.extend(("## Evidence", ""))
     lines.extend(f"- {citation_links[token]}" for token in entity.citations)
+    relation_lines = _render_relationship_lines(
+        _Endpoint(kind="entity", node_id=entity.entity_id),
+        relationships,
+        entities,
+        pr_slugs,
+        citation_links,
+    )
+    if relation_lines:
+        lines.extend(("", "## Relationships", "", *relation_lines))
     return "\n".join(lines).rstrip()
 
 
@@ -1956,6 +2353,9 @@ def _render_pr_body(
     sources: Mapping[str, _Source],
     pages: Mapping[str, _Page],
     entities: Mapping[str, _Entity],
+    relationships: Mapping[str, _Relationship],
+    citation_links: Mapping[str, str],
+    pr_slugs: Mapping[str, str],
 ) -> str:
     lines = [f"# {_escape_heading(pr_number)}", "", "## Sources", ""]
     matching_sources = [
@@ -1980,7 +2380,75 @@ def _render_pr_body(
     if matching_entities:
         lines.extend(("", "## Entities", ""))
         lines.extend(f"- [[entities/{entity_id}]]" for entity_id in matching_entities)
+    relation_lines = _render_relationship_lines(
+        _Endpoint(kind="pr", node_id=pr_number),
+        relationships,
+        entities,
+        pr_slugs,
+        citation_links,
+    )
+    if relation_lines:
+        lines.extend(("", "## Relationships", "", *relation_lines))
     return "\n".join(lines).rstrip()
+
+
+def _render_relationship_lines(
+    current: _Endpoint,
+    relationships: Mapping[str, _Relationship],
+    entities: Mapping[str, _Entity],
+    pr_slugs: Mapping[str, str],
+    citation_links: Mapping[str, str],
+) -> list[str]:
+    lines: list[str] = []
+    for relationship_id in sorted(relationships, key=_stable_key):
+        relationship = relationships[relationship_id]
+        if relationship.subject == current:
+            direction = "->"
+            other = relationship.object
+        elif relationship.object == current:
+            direction = "<-"
+            other = relationship.subject
+        else:
+            continue
+        other_link = _endpoint_wikilink(other, entities, pr_slugs)
+        lines.append(
+            f"- `{relationship.predicate}` {direction} {other_link}"
+        )
+        rendered_assertion = relationship.assertion
+        for token in relationship.citations:
+            rendered_assertion = rendered_assertion.replace(
+                token, citation_links[token]
+            )
+        lines.append(f"  - Assertion: {rendered_assertion}")
+        if relationship.description.strip():
+            rendered_description = relationship.description
+            for token in relationship.citations:
+                rendered_description = rendered_description.replace(
+                    token, citation_links[token]
+                )
+            lines.append(f"  - Description: {rendered_description.strip()}")
+        evidence = " ".join(
+            citation_links[token] for token in relationship.citations
+        )
+        lines.append(f"  - Evidence: {evidence}")
+    return lines
+
+
+def _endpoint_wikilink(
+    endpoint: _Endpoint,
+    entities: Mapping[str, _Entity],
+    pr_slugs: Mapping[str, str],
+) -> str:
+    if endpoint.kind == "entity":
+        entity = entities[endpoint.node_id]
+        return (
+            f"[[entities/{endpoint.node_id}]] "
+            f"({_escape_markdown_text(entity.canonical_name)})"
+        )
+    return (
+        f"[[prs/{pr_slugs[endpoint.node_id]}]] "
+        f"({_escape_markdown_text(endpoint.node_id)})"
+    )
 
 
 def _render_index_body(
@@ -2032,6 +2500,7 @@ def _render_quartz_manifest(
     integrated_manifest_sha256: str,
     sources: Mapping[str, _Source],
     entities: Mapping[str, _Entity],
+    relationships: Mapping[str, _Relationship],
     pages: Mapping[str, _Page],
     pr_slugs: Mapping[str, str],
     files: Mapping[str, bytes],
@@ -2054,6 +2523,7 @@ def _render_quartz_manifest(
         "source_count": len(sources),
         "topic_count": len(pages),
         "entity_count": len(entities),
+        "relationship_count": len(relationships),
         "pr_count": len(pr_slugs),
         "page_count": content_page_count,
         "asset_count": len(assets),
@@ -2088,6 +2558,13 @@ def _validate_rendered_tree(
         if path.startswith("content/"):
             _validate_generated_frontmatter(value)
         _validate_no_dangerous_html(value, path)
+        if (
+            any(match.group("image") for match in _INLINE_LINK_RE.finditer(value))
+            or _REFERENCE_IMAGE_RE.search(value)
+            or "![[" in value
+            or _HTML_IMAGE_RE.search(value)
+        ):
+            raise ValueError(f"image markup is not allowed in Quartz output: {path}")
         _validate_no_malformed_qualified_citations(value, path)
         if _QUALIFIED_CITATION_RE.search(value) or _LOCAL_CITATION_RE.search(value):
             raise ValueError(f"unmaterialized citation remains in Quartz output: {path}")

@@ -10,7 +10,7 @@ import pptx_wiki.configured as configured_module
 from pptx_wiki.config import load_config
 from pptx_wiki.configured import run_configured
 from pptx_wiki.ocr import OCRBlock, OCRRequest, OCRResult
-from pptx_wiki.pipeline import run_pipeline
+from pptx_wiki.pipeline import PipelineConfig, run_pipeline
 from pptx_wiki.synthesis import SynthesisConfig, WikiSynthesis
 from pptx_wiki.wiki_output import load_provenance
 
@@ -18,7 +18,11 @@ from pptx_wiki.wiki_output import load_provenance
 class _FixtureOCR:
     name = "fixture"
 
+    def __init__(self) -> None:
+        self.calls = 0
+
     def recognize(self, request: OCRRequest) -> OCRResult:
+        self.calls += 1
         assert Path(request.image).is_file()
         return OCRResult(
             backend=self.name,
@@ -53,6 +57,7 @@ def test_pipeline_native_plus_roi_ocr_without_paid_services(complex_pptx, tmp_pa
     result = run_pipeline(
         source,
         tmp_path / "out",
+        config=PipelineConfig(include_images=True),
         ocr_adapter=_FixtureOCR(),
         rendered_slides_dir=slides_dir,
         synthesis_backend=_GroundedWikiBackend(),
@@ -69,6 +74,51 @@ def test_pipeline_native_plus_roi_ocr_without_paid_services(complex_pptx, tmp_pa
     assert result.wiki.semantic is result.semantic
     qa = json.loads(result.qa_path.read_text(encoding="utf-8"))
     assert qa["ocr_failures"] == 0
+
+
+def test_pipeline_default_drops_pictures_without_calling_ocr(
+    complex_pptx, tmp_path: Path
+) -> None:
+    source, _ = complex_pptx
+    slides_dir = tmp_path / "rendered-with-ignored-picture"
+    slides_dir.mkdir()
+    for number in (1, 2):
+        Image.new("RGB", (4000, 2250), "white").save(
+            slides_dir / f"slide-{number:04d}.png"
+        )
+    adapter = _FixtureOCR()
+
+    result = run_pipeline(
+        source,
+        tmp_path / "without-pictures",
+        ocr_adapter=adapter,
+        rendered_slides_dir=slides_dir,
+    )
+
+    records = load_provenance(result.corpus.provenance_path)
+    assert len([record for record in records if record["kind"] == "table"]) == 2
+    assert not any(
+        record["kind"] in {"image", "picture", "ocr_table", "ocr_text"}
+        or record["asset_path"]
+        for record in records
+    )
+    assert adapter.calls == 0
+    assert result.ocr_successes == result.ocr_failures == 0
+    assert not list((result.parsed_dir / "source-assets" / "images").glob("*"))
+    deck = json.loads(result.deck_path.read_text(encoding="utf-8"))
+    elements = [
+        element
+        for slide in deck["slides"]
+        for element in slide["elements"]
+    ]
+    assert not any(
+        element["kind"] in {"image", "picture"} or element["asset_path"]
+        for element in elements
+    )
+    for slide_path in result.corpus.slide_paths:
+        markdown = slide_path.read_text(encoding="utf-8")
+        assert "![" not in markdown
+        assert "<img" not in markdown.casefold()
 
 
 def test_configured_pipeline_returns_the_same_wiki_result_contract(

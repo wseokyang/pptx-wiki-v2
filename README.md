@@ -4,11 +4,18 @@
 
 `batch` 명령은 여러 PPTX를 아래 순서로 한 번에 처리합니다.
 
-1. 각 PPTX를 원본 구조 그대로 `parsed`에 추출합니다. `ocr` 설정이 켜져 있으면 네이티브 추출로 읽지 못한 시각 객체만 OCR/VL 모델로 보완합니다.
+1. 각 PPTX의 텍스트·표·구조를 `parsed`에 추출합니다. 그림 객체는 기본적으로 처음부터 무시하며 asset, provenance, Markdown, OCR/VL 입력에 포함하지 않습니다. 차트·SmartArt 같은 비-picture 시각 객체는 `ocr` 설정이 켜져 있으면 OCR/VL 모델로 보완합니다.
 2. 각 parsed 근거를 LLM으로 선별·재구성해 PPTX당 `semantic.md` 한 개를 만듭니다. 작성 가이드, 템플릿, 무관한 예시와 정확히 중복된 블록은 제외하되 모든 결정은 `decisions.jsonl`에 기록합니다.
-3. 모든 `semantic.md`를 다시 읽고, 출처가 한정된 주제·엔터티를 만든 뒤 Quartz가 바로 읽을 수 있는 `quartz/content/`를 게시합니다.
+3. 사용자 LLM API가 semantic 문서와 인용된 원문 근거를 함께 읽어 반도체 패키지 신뢰성 분석 엔터티와 관계를 추출합니다. 검증된 KG를 바탕으로 Quartz가 바로 읽을 수 있는 `quartz/content/`를 게시합니다.
 
-PR 번호는 선택 정보가 아닙니다. 프로그램이 parsed provenance의 본문·표·OCR에서 `PR 번호`, `PR No.`, `의뢰번호` 라벨과 명시적인 `PR-...` 표기를 찾아 원문 값을 고정하며, 한 PPTX 안의 여러 번호도 모두 보존합니다. LLM이 번호를 빠뜨리거나 바꿀 수 없습니다. 번호가 이미지에만 있으면 `config.yml`에서 OCR/VL을 활성화해야 합니다. 번호를 찾지 못한 파일이 하나라도 있으면 LLM 호출 전에 실패합니다.
+PR 번호는 선택 정보가 아닙니다. 프로그램이 parsed provenance의 본문·표·OCR에서 `PR 번호`, `PR No.`, `의뢰번호` 라벨과 명시적인 `PR-...` 표기를 찾아 원문 값을 고정하며, 한 PPTX 안의 여러 번호도 모두 보존합니다. LLM이 번호를 빠뜨리거나 바꿀 수 없습니다. 그림은 기본적으로 무시하므로 PR 번호는 네이티브 텍스트나 표에도 있어야 합니다. 번호를 찾지 못한 파일이 하나라도 있으면 LLM 호출 전에 실패합니다.
+
+기본 `semantic.kg_profile: semiconductor_reliability`에서는 LLM이 `Package`,
+`Device`, `Lot`, `Sample`, `Test method`, `Test condition`, `Equipment`,
+`Material`, `Failure mode`, `Standard`, `Corrective action` 등을 노드 후보로
+추출하고 PR과의 관계를 제안합니다. 프로그램은 원문에 실제로 존재하는 명칭,
+허용된 citation, 해당 citation에 명시된 PR, 숫자·식별자만 받아들입니다. 관계를
+만들 근거가 모호하면 임의 연결하지 않고 warning으로 남깁니다.
 
 최초 한 번 Python 부트스트랩을 실행한 뒤 `config.yml`을 편집합니다. 가상환경을
 activate할 필요는 없습니다. `run.py`가 프로젝트의 `.venv` Python을 자동으로
@@ -40,7 +47,15 @@ python run.py output/collection --resume-quartz
 python run.py output/collection --resume-quartz --output output/collection/quartz-recovered
 ```
 
+그림 제외 정책과 KG 추출은 각각 parsed·integrated 단계의 계약이므로, 예전 output에
+`--resume-quartz`만 실행해도 소급 적용되지 않습니다. 코드를 업데이트한 뒤 기존
+output을 보존하고 **새롭고 비어 있는 `--output` 경로로 전체 batch를 다시 실행**하세요.
+
 `config.yml`은 `semantic.enabled: true`, `wiki.enabled: true`, `semantic.coverage_policy: selected`여야 의도한 불필요 내용 제거가 수행됩니다. LLM과 VLM은 서로 다른 `llm_api`, `vlm_api` 설정을 사용합니다.
+
+`semantic.kg_profile: semiconductor_reliability`가 기본값입니다. 이 프로필은
+별도 서비스가 아니라 같은 `llm_api`를 한 번 더 사용해 KG 후보를 추출합니다.
+KG가 필요 없는 범용 Markdown 실행만 원하면 `kg_profile: none`으로 끌 수 있습니다.
 
 주요 출력은 다음과 같습니다.
 
@@ -58,7 +73,8 @@ collection/
       manifest.json
   integrated/
     source-map.jsonl        # deck-local citation을 전역 citation으로 매핑
-    entities.jsonl
+    entities.jsonl          # 패키지, Lot, 시험법, 조건, 불량모드 등의 KG 노드
+    relationships.jsonl     # PR↔엔터티 및 엔터티↔엔터티의 근거 기반 KG edge
     pages.jsonl
     coverage.jsonl
     manifest.json
@@ -84,19 +100,19 @@ Quartz 프로젝트에 `quartz/content/`를 복사한 뒤 `npx quartz build`로 
 
 1. 네이티브 텍스트박스와 표는 OCR하지 않고 PPTX OOXML에서 직접 읽습니다.
 2. 각 `<a:tbl>` 객체는 간격과 관계없이 독립된 표로 유지합니다.
-3. 그림·차트·SmartArt 같은 시각 객체만 개별 ROI로 렌더링합니다.
+3. 그림 객체는 기본적으로 파싱 대상에서 제외합니다. 차트·SmartArt 같은 비-picture 시각 객체만 개별 ROI로 렌더링합니다.
 4. ROI의 원본 픽셀은 이웃 객체와 겹치지 않게 중간 경계에서 자릅니다.
 5. 모델에 필요한 여백은 crop 이후 흰색 픽셀로 추가합니다.
 6. `parsed`는 LLM 없이 만들며 이후 단계가 수정하지 않는 원본 근거입니다.
-7. `semantic`에서만 LLM을 사용해 목적에 맞는 근거를 선택하고 주제별로 재구성합니다.
-8. `wiki`는 LLM을 호출하지 않고 검증된 semantic 문서를 Markdown으로 게시합니다.
-9. LLM 결과는 기존 block citation과 숫자만 사용할 수 있으며, 검증 실패 시
+7. `semantic`에서 LLM을 사용해 목적에 맞는 근거를 선택하고 주제별로 재구성합니다.
+8. collection 통합 단계에서 같은 LLM API로 반도체 신뢰성 KG 노드·관계를 구조화합니다. PR 노드는 코드가 만들고 LLM은 감지된 PR을 새로 만들거나 바꿀 수 없습니다.
+9. Quartz 게시 자체는 LLM을 호출하지 않고 검증된 semantic/KG 산출물을 Markdown으로 변환합니다.
+10. LLM 결과는 기존 block citation과 숫자만 사용할 수 있으며, 검증 실패 시
    원문 block을 그대로 쓰는 fail-closed fallback으로 전환합니다.
 
-따라서 1pt 간격의 네이티브 표 두 개도 한 표로 OCR되지 않습니다. 단, 하나의
-비트맵 이미지 자체에 여러 표가 들어 있는 경우에는 PPTX에 내부 경계가 없으므로
-OCR/layout backend가 여러 block을 반환해야 합니다. 안전하게 분리할 수 없는
-비트맵은 사람이 확인해야 합니다.
+따라서 1pt 간격의 네이티브 표 두 개도 한 표로 OCR되지 않습니다. 그림 안에만 있는
+표나 PR 번호는 기본 설정에서 읽지 않습니다. 업무상 반드시 필요한 경우에만
+`extraction.include_images: true`로 명시적으로 허용할 수 있습니다.
 
 ## Python 권장 실행법
 
@@ -134,8 +150,9 @@ python -m venv .venv
 macOS/Linux에서는 마지막 명령의 인터프리터 경로만
 `.venv/bin/python`으로 바꿉니다.
 
-OCR 모델은 크고 런타임 의존성이 달라 메인 앱과 섞어 설치하지 않습니다. 이미지
-OCR이 필요 없으면 `config.yml`에서 `ocr.enabled: false`, `backend: none`을 사용하고,
+OCR 모델은 크고 런타임 의존성이 달라 메인 앱과 섞어 설치하지 않습니다. 그림은
+`extraction.include_images: false`일 때 OCR/VL로 전송되지 않습니다. 차트·SmartArt
+OCR도 필요 없으면 `config.yml`에서 `ocr.enabled: false`, `backend: none`을 사용하고,
 OpenAI-compatible VLM이 있으면 `backend: openai_vlm`으로 설정할 수 있습니다. 로컬
 GPU OCR worker를 사용할 때만 [workers/README.md](./workers/README.md)의 별도 설치
 절차가 필요합니다.
@@ -164,6 +181,8 @@ semantic:
   enabled: true
   goal: "핵심 업무 내용만 보존하고 작성 가이드와 무관한 예시는 제외합니다."
   coverage_policy: selected
+  kg_profile: semiconductor_reliability
+  max_relationships: 512
 
 wiki:
   enabled: true
@@ -224,8 +243,9 @@ macOS/Linux에서는 `.venv\Scripts\python.exe` 대신 `.venv/bin/python`을 사
 .venv\Scripts\python.exe -m pptx_wiki.cli parse input.pptx -o output/my-deck
 ```
 
-텍스트박스, 네이티브 표, 병합 셀, 그룹 좌표, 발표자 노트가 추출됩니다.
-결과는 `output/my-deck/parsed/` 아래에 생성됩니다. 이미지 OCR을 사용하지 않는다면
+텍스트박스, 네이티브 표, 병합 셀, 그룹 좌표, 발표자 노트가 추출됩니다. 그림은
+`deck.json`, provenance, Markdown, source asset에 기록하지 않습니다.
+결과는 `output/my-deck/parsed/` 아래에 생성됩니다. 시각 객체 OCR을 사용하지 않는다면
 GPU, LLM, 외부 API가 필요 없습니다.
 
 ### 2. semantic — 의미 기반 선택·재정리
@@ -345,7 +365,7 @@ output/my-deck/
 │   ├── manifest.json
 │   ├── deck.json             # 전체 native/OCR 중간 표현
 │   ├── qa.json               # 추출 경고, OCR 실패, 숫자 충돌
-│   ├── source-assets/        # PPTX에 포함된 원본 이미지
+│   ├── source-assets/        # include_images=true일 때만 생성되는 선택 이미지 asset
 │   ├── rendered/             # 슬라이드 렌더 이미지
 │   ├── roi/                  # 서로 겹치지 않는 모델 입력 crop
 │   ├── ocr-results/          # backend 원본 결과

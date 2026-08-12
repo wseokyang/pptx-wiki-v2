@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from pptx_wiki.quartz_publish import publish_quartz
+from pptx_wiki.quartz_publish import _validate_rendered_tree, publish_quartz
 
 
 def _make_directory_link(link: Path, target: Path) -> None:
@@ -69,3 +69,20 @@ def test_publish_quartz_rejects_linked_output_directory(tmp_path: Path) -> None:
             integrated,
             linked_output,
         )
+
+
+@pytest.mark.parametrize(
+    "image_markup",
+    (
+        "![external](https://example.test/result.png)",
+        "![external][result]\n\n[result]: https://example.test/result.png",
+        '<img src="https://example.test/result.png" alt="external">',
+    ),
+)
+def test_quartz_final_validator_rejects_all_image_markup(
+    image_markup: str,
+) -> None:
+    files = {"README.md": f"# Generated Wiki\n\n{image_markup}\n".encode()}
+
+    with pytest.raises(ValueError, match="image markup is not allowed"):
+        _validate_rendered_tree(files, {})

@@ -29,6 +29,9 @@ render:
   pdf_binary: null
 
 extraction:
+  # Embedded pictures/logos/screenshots are ignored from parsed output onward.
+  # Set true only when image evidence and image OCR/VL are intentionally needed.
+  include_images: false
   include_empty_shapes: false
   strict: false
 
@@ -103,7 +106,7 @@ semantic:
   # The batch command scans every body/table/OCR block for one or more PR
   # numbers (including PR 번호/PR No./의뢰번호 labels) and preserves every
   # exact spelling independently of this prompt.
-  goal: "핵심 업무 내용만 보존하고 PPT 작성 가이드, 템플릿 문구, 무관한 예시는 제외합니다."
+  goal: "반도체 패키지 신뢰성 의뢰·분석 결과에 직접 관련된 PR 번호, 대상·시료·Lot, 시험 방법·조건, 표준, 측정·관찰 결과, 불량 모드, 원인 판단, 결론과 후속 조치만 보존하고 PPT 작성 가이드, 템플릿 문구, 무관한 예시와 반복 문구는 제외합니다."
   # selected omits content outside the goal while recording every omission in semantic/manifest.json.
   coverage_policy: selected
   language: Korean
@@ -112,6 +115,11 @@ semantic:
   max_topics: 64
   repair_attempts: 2
   discover_topics: true
+  # Build an evidence-grounded semiconductor reliability knowledge graph with
+  # the configured LLM. Use "none" only when topic Markdown without KG edges
+  # is desired.
+  kg_profile: semiconductor_reliability
+  max_relationships: 512
 
 wiki:
   enabled: true

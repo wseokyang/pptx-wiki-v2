@@ -29,6 +29,7 @@ class PipelineConfig:
     dpi: int = 300
     source_padding_ratio: float = 0.002
     model_padding_px: int = 24
+    include_images: bool = False
     include_empty_shapes: bool = False
     strict_extraction: bool = False
     strict_ocr: bool = False
@@ -83,6 +84,7 @@ def run_pipeline(
     deck = extract_pptx(
         source,
         assets_dir=source_assets,
+        include_images=settings.include_images,
         include_empty_shapes=settings.include_empty_shapes,
         strict=settings.strict_extraction,
     )
@@ -99,7 +101,12 @@ def run_pipeline(
 
     ocr_successes = 0
     ocr_failures = 0
-    if ocr_adapter is not None or rendered_slides_dir is not None:
+    has_visual_targets = any(
+        element.kind in OCR_KINDS
+        for slide in deck.slides
+        for element in slide.elements
+    )
+    if (ocr_adapter is not None or rendered_slides_dir is not None) and has_visual_targets:
         rendered = _resolve_rendered_slides(
             source,
             parsed,
@@ -170,6 +177,12 @@ def run_pipeline(
             "block_count": corpus.block_count,
             "qa_error_count": sum(issue.severity == "error" for issue in issues),
             "qa_issue_count": len(issues),
+            "extraction": {
+                "include_images": settings.include_images,
+                "ignored_image_count": int(
+                    deck.metadata.get("ignored_image_count", 0)
+                ),
+            },
             "ocr_successes": ocr_successes,
             "ocr_failures": ocr_failures,
         },
