@@ -532,9 +532,10 @@ def _stage_verified_snapshot(
         descriptor = os.open(occurrence.path, flags)
         try:
             opened = os.fstat(descriptor)
-            current = os.lstat(occurrence.path)
-            if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(opened, current):
-                raise ValueError(f"input path changed while opening: {occurrence.path.name}")
+            identity_matches = _regular_path_identity_matches(
+                opened,
+                occurrence.path,
+            )
             digest = sha256()
             with os.fdopen(descriptor, "rb", closefd=False) as source, snapshot.open("xb") as target:
                 for chunk in iter(lambda: source.read(1024 * 1024), b""):
@@ -549,6 +550,14 @@ def _stage_verified_snapshot(
                 or digest.hexdigest() != occurrence.sha256
             ):
                 raise ValueError(f"input changed while staging: {occurrence.path.name}")
+            if not identity_matches:
+                _verify_current_path_digest(
+                    occurrence.path,
+                    occurrence.sha256,
+                    error_message=(
+                        f"input path changed while opening: {occurrence.path.name}"
+                    ),
+                )
         finally:
             os.close(descriptor)
         validate_pptx_archive(
@@ -577,9 +586,7 @@ def _inspect_input_handle(
     descriptor = os.open(path, flags)
     try:
         before = os.fstat(descriptor)
-        current = os.lstat(path)
-        if not stat.S_ISREG(before.st_mode) or not os.path.samestat(before, current):
-            raise ValueError(f"input path changed while opening: {path.name}")
+        identity_matches = _regular_path_identity_matches(before, path)
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             digest = sha256()
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -594,9 +601,66 @@ def _inspect_input_handle(
         after = os.fstat(descriptor)
         if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
             raise ValueError(f"input changed while reading: {path.name}")
-        return before.st_size, before.st_mtime_ns, digest.hexdigest()
+        digest_value = digest.hexdigest()
+        if not identity_matches:
+            _verify_current_path_digest(
+                path,
+                digest_value,
+                error_message=f"input path changed while opening: {path.name}",
+            )
+        return before.st_size, before.st_mtime_ns, digest_value
     finally:
         os.close(descriptor)
+
+
+def _regular_path_identity_matches(opened: os.stat_result, path: Path) -> bool:
+    """Compare handle/path identity, tolerating one transient provider result."""
+
+    if not stat.S_ISREG(opened.st_mode):
+        raise ValueError(f"input is not a regular file: {path.name}")
+    for _ in range(2):
+        current = os.lstat(path)
+        if not stat.S_ISREG(current.st_mode):
+            raise ValueError(f"input path is not a regular file: {path.name}")
+        try:
+            if os.path.samestat(opened, current):
+                return True
+        except (OSError, ValueError):
+            pass
+    return False
+
+
+def _verify_current_path_digest(
+    path: Path,
+    expected_sha256: str,
+    *,
+    error_message: str,
+) -> None:
+    """Use an independent stable handle when a filesystem has unreliable IDs."""
+
+    _reject_reparse_path(path)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(error_message)
+        digest = sha256()
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or digest.hexdigest() != expected_sha256
+        ):
+            raise ValueError(error_message)
+    finally:
+        os.close(descriptor)
+    _reject_reparse_path(path)
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        raise ValueError(error_message)
 
 
 def _source_result(item: _PendingSource) -> CollectionSourceResult:
