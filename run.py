@@ -41,6 +41,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="run parsed -> semantic -> integrated -> Quartz for all inputs",
     )
+    parser.add_argument(
+        "--resume-quartz",
+        action="store_true",
+        help="reuse an existing collection/integrated artifact and publish only Quartz",
+    )
     parser.add_argument("--recursive", action="store_true")
     parser.add_argument("--site-title", default="신뢰성 분석 LLM Wiki")
     return parser
@@ -96,12 +101,49 @@ def _command(
     return command
 
 
+def _quartz_command(
+    collection_dir: Path,
+    output_path: Path | None,
+    *,
+    site_title: str,
+) -> list[str]:
+    command = [
+        str(_project_python()),
+        "-u",
+        "-m",
+        "pptx_wiki.cli",
+        "quartz",
+        str(collection_dir),
+        "--site-title",
+        site_title,
+    ]
+    if output_path is not None:
+        command.extend(("--output", str(output_path)))
+    return command
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     input_paths = tuple(_absolute(value) for value in args.input)
     config_path = _absolute(args.config)
     output_path = _absolute(args.output) if args.output is not None else None
+    if args.resume_quartz:
+        if len(input_paths) != 1 or not input_paths[0].is_dir():
+            parser.error("--resume-quartz requires exactly one existing collection directory")
+        try:
+            command = _quartz_command(
+                input_paths[0],
+                output_path,
+                site_title=args.site_title,
+            )
+        except FileNotFoundError as exc:
+            parser.error(str(exc))
+        print(f"Collection: {input_paths[0]}", flush=True)
+        print(f"Python    : {command[0]}", flush=True)
+        print("-" * 72, flush=True)
+        return _run_command(command)
+
     batch = bool(args.batch or len(input_paths) > 1 or any(path.is_dir() for path in input_paths))
 
     for input_path in input_paths:
@@ -136,6 +178,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Python : {command[0]}", flush=True)
     print("-" * 72, flush=True)
 
+    return _run_command(command)
+
+
+def _run_command(command: Sequence[str]) -> int:
     environment = os.environ.copy()
     environment.setdefault("PYTHONUTF8", "1")
     environment["PYTHONUNBUFFERED"] = "1"

@@ -12,6 +12,7 @@ from .collection import DEFAULT_COLLECTION_GOAL
 from .configured import run_configured, run_configured_collection
 from .ocr import CommandOCRAdapter, FallbackOCRAdapter, OpenAICompatibleVLMAdapter, PaddleOCRCLIAdapter
 from .pipeline import PipelineConfig, run_pipeline
+from .quartz_publish import publish_quartz
 from .semantic import SemanticConfig, build_semantic_output
 from .synthesis import OpenAICompatibleClient
 from .wiki_publish import publish_wiki
@@ -81,6 +82,20 @@ def _parser() -> argparse.ArgumentParser:
     wiki.add_argument("input", type=Path, help="semantic artifact directory")
     wiki.add_argument("--parsed", type=Path, help="parsed directory; defaults to sibling parsed/")
     wiki.add_argument("-o", "--output", required=True, type=Path)
+
+    quartz = subparsers.add_parser(
+        "quartz",
+        aliases=["publish-quartz"],
+        help="publish or resume Quartz output from an existing integrated collection",
+    )
+    quartz.add_argument("input", type=Path, help="existing collection directory")
+    quartz.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Quartz output; defaults to <collection>/quartz",
+    )
+    quartz.add_argument("--site-title", default="신뢰성 분석 LLM Wiki")
     return parser
 
 
@@ -337,6 +352,36 @@ def _wiki(args: argparse.Namespace) -> int:
     return 0
 
 
+def _quartz(args: argparse.Namespace) -> int:
+    # Preserve lexical components so the publisher can reject symlinks and
+    # Windows junctions instead of silently resolving through them.
+    collection = args.input.expanduser().absolute()
+    output = (
+        args.output.expanduser().absolute()
+        if args.output is not None
+        else collection / "quartz"
+    )
+    result = publish_quartz(
+        collection,
+        collection / "integrated",
+        output,
+        site_title=args.site_title,
+    )
+    print(
+        json.dumps(
+            {
+                "quartz_dir": str(result.output_dir),
+                "content_dir": str(result.content_dir),
+                "pages": result.page_count,
+                "prs": result.pr_count,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
 def _convert(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     source = args.input.expanduser().resolve()
@@ -462,6 +507,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _organize(args)
         if args.command == "wiki":
             return _wiki(args)
+        if args.command in {"quartz", "publish-quartz"}:
+            return _quartz(args)
     except (OSError, RuntimeError, ValueError) as exc:
         parser.exit(2, f"pptx-wiki: error: {exc}\n")
     return 2

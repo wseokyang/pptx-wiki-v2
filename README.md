@@ -25,6 +25,21 @@ python run.py "D:\reliability\incoming" --batch --recursive --config config.yml 
 python run.py PR-001.pptx PR-002.pptx --batch --config config.yml --output output/collection
 ```
 
+이미 `semantic/`과 `integrated/`까지 완료되었고 Quartz 게시 단계만 실패했다면,
+LLM을 다시 호출하지 않고 기존 통합 산출물에서 Quartz만 재개할 수 있습니다.
+
+```console
+python run.py output/collection --resume-quartz
+```
+
+기본 출력은 `output/collection/quartz/`입니다. 최초 Quartz 게시 실패는 완성되지 않은
+디렉터리를 남기지 않으므로 보통 기본 명령으로 재개됩니다. 이전에 성공한 Quartz
+결과처럼 해당 디렉터리에 파일이 이미 있다면 비어 있는 새 경로를 지정합니다.
+
+```console
+python run.py output/collection --resume-quartz --output output/collection/quartz-recovered
+```
+
 `config.yml`은 `semantic.enabled: true`, `wiki.enabled: true`, `semantic.coverage_policy: selected`여야 의도한 불필요 내용 제거가 수행됩니다. LLM과 VLM은 서로 다른 `llm_api`, `vlm_api` 설정을 사용합니다.
 
 주요 출력은 다음과 같습니다.

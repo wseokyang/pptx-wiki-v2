@@ -83,6 +83,21 @@ def _write_prs_outside_title(
     return path
 
 
+def _write_case_variant_identifier_pptx(path: Path) -> Path:
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[5])
+    slide.shapes.title.text = "LOT NO."
+
+    body = slide.shapes.add_textbox(
+        Inches(0.5), Inches(1.5), Inches(7.0), Inches(0.8)
+    )
+    body.name = "REQUEST_BODY"
+    body.text_frame.text = "PR-00123 reliability result\nLot No. ABC123"
+
+    presentation.save(path)
+    return path
+
+
 def _write_pptx_with_image(path: Path, image_path: Path) -> Path:
     presentation = Presentation()
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
@@ -522,6 +537,71 @@ def test_integrated_identifier_tokens_do_not_cross_line_boundaries(
     ]
     assert tokens
     assert all("\r" not in token and "\n" not in token for token in tokens)
+
+
+def test_integrated_identifier_tokens_deduplicate_case_variants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _write_case_variant_identifier_pptx(
+        tmp_path / "identifier-case-variant.pptx"
+    )
+    _install_fake_quartz(monkeypatch)
+
+    result = run_collection(
+        [source],
+        tmp_path / "collection",
+        semantic_backend=_ScriptedBackend(),
+        integration_backend=_ScriptedBackend(),
+        config=CollectionConfig(
+            semantic=SemanticConfig(
+                coverage_policy="selected",
+                discover_topics=False,
+                repair_attempts=0,
+            ),
+            integration=IntegrationConfig(repair_attempts=0),
+        ),
+    )
+
+    source_map_path = result.integrated.source_map_path
+    source_map = [
+        json.loads(line)
+        for line in source_map_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    legacy_record = next(
+        record
+        for record in source_map
+        if "LOT NO." in record["identifier_tokens"]
+    )
+    legacy_record["identifier_tokens"].append("Lot No.")
+    source_map_text = "".join(
+        json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+        for record in source_map
+    )
+    source_map_path.write_text(
+        source_map_text,
+        encoding="utf-8",
+        newline="\n",
+    )
+    manifest_path = result.integrated.manifest_path
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"]["source-map.jsonl"]["sha256"] = sha256(
+        source_map_text.encode("utf-8")
+    ).hexdigest()
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    published = publish_quartz(
+        result.output_dir,
+        result.integrated.output_dir,
+        tmp_path / "republished-quartz",
+        site_title="Identifier Deduplication Test Wiki",
+    )
+    assert published.manifest_path.is_file()
+    assert legacy_record["identifier_tokens"][-2:] == ["LOT NO.", "Lot No."]
 
 
 def test_quartz_rejects_tampered_collection_image_asset(

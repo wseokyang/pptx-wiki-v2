@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
@@ -251,9 +252,17 @@ def publish_quartz(
     """
 
     title = _one_line(site_title, "site_title")
-    collection = Path(collection_dir).expanduser().resolve()
-    integrated = Path(integrated_dir).expanduser().resolve()
-    destination = Path(output_dir).expanduser().resolve()
+    # Keep the lexical paths until every existing component has been checked.
+    # Resolving first would hide a symlink or Windows junction from the guards.
+    collection_input = Path(collection_dir).expanduser().absolute()
+    integrated_input = Path(integrated_dir).expanduser().absolute()
+    destination_input = Path(output_dir).expanduser().absolute()
+    _reject_reparse_components(collection_input, "collection")
+    _reject_reparse_components(integrated_input, "integrated")
+    _reject_reparse_components(destination_input, "Quartz output")
+    collection = collection_input.resolve(strict=True)
+    integrated = integrated_input.resolve(strict=True)
+    destination = destination_input.resolve(strict=False)
     _validate_input_root(collection, "collection")
     _validate_input_root(integrated, "integrated")
     _ensure_empty_destination(destination)
@@ -485,6 +494,38 @@ def _validate_input_root(path: Path, label: str) -> None:
         raise FileNotFoundError(f"{label} directory not found: {path}")
     if path.is_symlink():
         raise ValueError(f"{label} directory must not be a symlink: {path}")
+
+
+def _reject_reparse_components(path: Path, label: str) -> None:
+    """Reject symlinks and Windows reparse points in a lexical path."""
+
+    current = path
+    existing: list[Path] = []
+    while True:
+        if current.exists() or current.is_symlink():
+            existing.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    for component in reversed(existing):
+        if _is_reparse_point(component):
+            raise ValueError(
+                f"{label} path must not contain a symlink/junction/reparse point: "
+                f"{component}"
+            )
+
+
+def _is_reparse_point(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if callable(is_junction) and is_junction():
+        return True
+    try:
+        attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+    except OSError:
+        return False
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
 
 def _ensure_empty_destination(path: Path) -> None:
@@ -1142,10 +1183,9 @@ def _parse_source_map(
             f"{label}.numeric_tokens",
             nonempty=False,
         )
-        identifier_tokens = _string_tuple(
+        identifier_tokens = _identifier_token_tuple(
             value.get("identifier_tokens"),
             f"{label}.identifier_tokens",
-            nonempty=False,
         )
         local_match = _LOCAL_CITATION_RE.fullmatch(local)
         if (
@@ -1173,9 +1213,7 @@ def _parse_source_map(
             raise ValueError(f"{label} has no parsed provenance record")
         visible = f"{provenance.get('slide_title', '')}\n{provenance.get('content', '')}"
         expected_numeric = tuple(sorted(_numeric_tokens(visible), key=_stable_key))
-        expected_identifiers = tuple(
-            dict.fromkeys(match.group(0) for match in _IDENTIFIER_TOKEN_RE.finditer(visible))
-        )
+        expected_identifiers = _identifier_tokens(visible)
         if numeric_tokens != expected_numeric:
             raise ValueError(f"{label} numeric token inventory mismatch")
         if identifier_tokens != expected_identifiers:
@@ -2261,6 +2299,20 @@ def _normal_number(value: str) -> str:
     return cleaned + ("%" if percent else "")
 
 
+def _identifier_tokens(value: str) -> tuple[str, ...]:
+    """Mirror the integrated artifact's case-insensitive token inventory."""
+
+    values: list[str] = []
+    seen: set[str] = set()
+    for match in _IDENTIFIER_TOKEN_RE.finditer(value):
+        token = unicodedata.normalize("NFC", match.group(0))
+        key = token.casefold()
+        if key not in seen:
+            seen.add(key)
+            values.append(token)
+    return tuple(values)
+
+
 def _validate_page_entity_wikilinks(
     body: str, entity_ids: Sequence[str], page_id: str
 ) -> None:
@@ -2517,6 +2569,28 @@ def _string_tuple(
             raise ValueError(f"{label} contains a duplicate value: {parsed!r}")
         seen.add(key)
         values.append(parsed)
+    return tuple(values)
+
+
+def _identifier_token_tuple(value: Any, label: str) -> tuple[str, ...]:
+    """Read a legacy identifier inventory and collapse case-only duplicates.
+
+    Identifier inventories are set-like.  Older integrated artifacts emitted
+    both ``LOT NO.`` and ``Lot No.`` while the publisher already treated them
+    as the same value.  Preserve the first spelling so Quartz can be resumed
+    without weakening duplicate validation for any other artifact field.
+    """
+
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be an array of strings")
+    values: list[str] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        parsed = _one_line(item, f"{label}[{index}]")
+        key = unicodedata.normalize("NFC", parsed).casefold()
+        if key not in seen:
+            seen.add(key)
+            values.append(parsed)
     return tuple(values)
 
 

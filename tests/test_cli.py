@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Mapping, Sequence
 
 import pptx_wiki.cli as cli_module
@@ -140,6 +141,70 @@ def test_cli_wiki_publishes_semantic_artifact_from_sibling_parsed_dir(
     summary = json.loads(capsys.readouterr().out)
     assert summary["pages"] == 1
     assert Path(summary["wiki_dir"]) == wiki.resolve()
+
+
+def test_cli_quartz_dispatches_without_loading_config_or_collection_pipeline(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    collection = tmp_path / "finished-collection"
+    collection.mkdir()
+    output = tmp_path / "republished-quartz"
+    recorded: dict[str, object] = {}
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Quartz resume must not load config or rerun collection")
+
+    def fake_publish_quartz(
+        collection_dir: Path,
+        integrated_dir: Path,
+        output_dir: Path,
+        *,
+        site_title: str,
+    ) -> SimpleNamespace:
+        recorded.update(
+            collection_dir=collection_dir,
+            integrated_dir=integrated_dir,
+            output_dir=output_dir,
+            site_title=site_title,
+        )
+        return SimpleNamespace(
+            output_dir=output_dir,
+            content_dir=output_dir / "content",
+            page_count=7,
+            pr_count=2,
+        )
+
+    monkeypatch.setattr(cli_module, "load_config", forbidden)
+    monkeypatch.setattr(cli_module, "run_configured_collection", forbidden)
+    monkeypatch.setattr(cli_module, "publish_quartz", fake_publish_quartz)
+
+    assert (
+        main(
+            [
+                "quartz",
+                str(collection),
+                "--output",
+                str(output),
+                "--site-title",
+                "Recovered Wiki",
+            ]
+        )
+        == 0
+    )
+
+    assert recorded == {
+        "collection_dir": collection.resolve(),
+        "integrated_dir": collection.resolve() / "integrated",
+        "output_dir": output.resolve(),
+        "site_title": "Recovered Wiki",
+    }
+    summary = json.loads(capsys.readouterr().out)
+    assert summary == {
+        "quartz_dir": str(output.resolve()),
+        "content_dir": str(output.resolve() / "content"),
+        "pages": 7,
+        "prs": 2,
+    }
 
 
 def test_cli_runs_native_only(complex_pptx, tmp_path: Path, capsys) -> None:

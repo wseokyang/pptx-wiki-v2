@@ -64,3 +64,54 @@ def test_runner_rejects_non_pptx_input(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit, match="2"):
         runner.main([str(source), "--config", str(config)])
+
+
+def test_runner_resume_quartz_bypasses_pptx_and_config_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = _load_runner()
+    collection = tmp_path / "finished-collection"
+    collection.mkdir()
+    missing_config = tmp_path / "does-not-exist.yml"
+    output = tmp_path / "republished-quartz"
+    project_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    recorded: dict[str, object] = {}
+
+    monkeypatch.setattr(runner, "_project_python", lambda: project_python)
+
+    def fake_run(command, *, cwd, env, check):
+        recorded.update(command=command, cwd=cwd, env=env, check=check)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    assert (
+        runner.main(
+            [
+                str(collection),
+                "--resume-quartz",
+                "--config",
+                str(missing_config),
+                "--output",
+                str(output),
+                "--site-title",
+                "Recovered Wiki",
+            ]
+        )
+        == 0
+    )
+
+    command = recorded["command"]
+    assert command == [
+        str(project_python),
+        "-u",
+        "-m",
+        "pptx_wiki.cli",
+        "quartz",
+        str(collection.absolute()),
+        "--site-title",
+        "Recovered Wiki",
+        "--output",
+        str(output.absolute()),
+    ]
+    assert str(missing_config) not in command

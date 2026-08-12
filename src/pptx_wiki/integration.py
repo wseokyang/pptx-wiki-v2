@@ -514,6 +514,14 @@ def validate_integrated_artifact(path: str | Path) -> dict[str, Any]:
             or not isinstance(identifier_tokens, list)
             or not all(isinstance(value, str) for value in identifier_tokens)
             or any("\n" in value or "\r" in value for value in identifier_tokens)
+            or any(value != unicodedata.normalize("NFC", value) for value in identifier_tokens)
+            or len(
+                {
+                    unicodedata.normalize("NFC", value).casefold()
+                    for value in identifier_tokens
+                }
+            )
+            != len(identifier_tokens)
         ):
             raise ValueError(f"integrated source-map token inventory is invalid: {citation}")
         source_map[str(citation)] = record
@@ -693,11 +701,8 @@ def _load_sources(
                         )
                     ),
                     "identifier_tokens": list(
-                        dict.fromkeys(
-                            match.group(0)
-                            for match in _IDENTIFIER_TOKEN_RE.finditer(
-                                f"{record.get('slide_title', '')}\n{record.get('content', '')}"
-                            )
+                        _identifier_tokens(
+                            f"{record.get('slide_title', '')}\n{record.get('content', '')}"
                         )
                     ),
                 }
@@ -1381,12 +1386,7 @@ def _validate_integrated_lineage(
                 "element_id": str(record["element_id"]),
                 "content_sha256": str(record["content_sha256"]),
                 "numeric_tokens": sorted(_numeric_tokens(visible)),
-                "identifier_tokens": list(
-                    dict.fromkeys(
-                        match.group(0)
-                        for match in _IDENTIFIER_TOKEN_RE.finditer(visible)
-                    )
-                ),
+                "identifier_tokens": list(_identifier_tokens(visible)),
             }
     if set(expected_all) != set(source_map):
         raise ValueError("integrated source-map coverage does not match source semantics")
@@ -1501,6 +1501,20 @@ def _numeric_tokens(value: str) -> set[str]:
     cleaned = re.sub(r"\]\([^\n)]*\)", "]", cleaned)
     cleaned = re.sub(r"(?m)^\s*\d+[.)]\s+", "", cleaned)
     return {_normal_number(match.group(0)) for match in _NUMBER_RE.finditer(cleaned)}
+
+
+def _identifier_tokens(value: str) -> tuple[str, ...]:
+    """Return first-seen identifiers, unique under the artifact validator key."""
+
+    values: list[str] = []
+    seen: set[str] = set()
+    for match in _IDENTIFIER_TOKEN_RE.finditer(value):
+        token = unicodedata.normalize("NFC", match.group(0))
+        key = token.casefold()
+        if key not in seen:
+            seen.add(key)
+            values.append(token)
+    return tuple(values)
 
 
 def _normal_number(value: str) -> str:
