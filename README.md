@@ -10,26 +10,19 @@
 
 PR 번호는 선택 정보가 아닙니다. 프로그램이 parsed provenance의 본문·표·OCR에서 `PR 번호`, `PR No.`, `의뢰번호` 라벨과 명시적인 `PR-...` 표기를 찾아 원문 값을 고정하며, 한 PPTX 안의 여러 번호도 모두 보존합니다. LLM이 번호를 빠뜨리거나 바꿀 수 없습니다. 번호가 이미지에만 있으면 `config.yml`에서 OCR/VL을 활성화해야 합니다. 번호를 찾지 못한 파일이 하나라도 있으면 LLM 호출 전에 실패합니다.
 
-```powershell
-.\.venv\Scripts\pptx-wiki.exe batch `
-  "D:\reliability\incoming" `
-  --recursive `
-  --config .\config.yml `
-  --output "D:\reliability\wiki-build"
+최초 한 번 Python 부트스트랩을 실행한 뒤 `config.yml`을 편집합니다. 가상환경을
+activate할 필요는 없습니다. `run.py`가 프로젝트의 `.venv` Python을 자동으로
+사용합니다.
+
+```console
+python bootstrap.py
+python run.py "D:\reliability\incoming" --batch --recursive --config config.yml --output "D:\reliability\wiki-build"
 ```
 
 파일을 직접 여러 개 지정해도 됩니다.
 
-```powershell
-.\.venv\Scripts\pptx-wiki.exe batch .\PR-001.pptx .\PR-002.pptx `
-  --config .\config.yml -o .\output\collection
-```
-
-Windows용 실행 스크립트도 같은 일괄 흐름을 지원합니다.
-
-```powershell
-python .\run.py "D:\reliability\incoming" --batch --recursive `
-  --config .\config.yml --output "D:\reliability\wiki-build"
+```console
+python run.py PR-001.pptx PR-002.pptx --batch --config config.yml --output output/collection
 ```
 
 `config.yml`은 `semantic.enabled: true`, `wiki.enabled: true`, `semantic.coverage_policy: selected`여야 의도한 불필요 내용 제거가 수행됩니다. LLM과 VLM은 서로 다른 `llm_api`, `vlm_api` 설정을 사용합니다.
@@ -90,34 +83,50 @@ Quartz 프로젝트에 `quartz/content/`를 복사한 뒤 `npx quartz build`로 
 OCR/layout backend가 여러 block을 반환해야 합니다. 안전하게 분리할 수 없는
 비트맵은 사람이 확인해야 합니다.
 
-## Windows 권장 실행법
+## Python 권장 실행법
 
 필요 조건은 64-bit Python 3.10 이상과 데스크톱 Microsoft PowerPoint입니다.
 Office COM 자동화 특성상 Windows Service/SYSTEM 계정보다 로그인된 일반 사용자
 세션에서 실행하는 것을 권장합니다.
 
-최초 한 번 PowerShell에서 설치합니다.
+최초 한 번 다음 Python 스크립트를 실행합니다.
 
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\setup-windows.ps1
+```console
+python bootstrap.py
 ```
 
-OCR 모델은 메인 앱과 의존성을 섞지 않습니다. 아래 네 환경 중 사용할 것 하나를
-별도로 설치하면 고정된 Hugging Face snapshot도 함께 내려받습니다. 기본값은
-PaddleOCR-VL 1.6입니다.
+이 명령은 다음 작업만 수행합니다.
 
-```powershell
-.\workers\paddleocr_vl_16\setup-windows.ps1 -Runtime cu126
+- 프로젝트 전용 `.venv`를 생성하거나 기존의 정상적인 `.venv`를 재사용
+- `.venv`에 `pptx-wiki`와 API/Windows 의존성을 editable 모드로 설치
+- `config.yml`이 없을 때만 `config.example.yml`을 복사
+- 기존 `.venv`나 `config.yml`이 비정상이면 덮어쓰거나 삭제하지 않고 중단
+
+개발·테스트 의존성까지 설치하려면 다음을 사용합니다.
+
+```console
+python bootstrap.py --dev
 ```
 
-CPU라면 `-Runtime cpu`를 사용합니다. 나머지 세 모델의 정확한 설치 명령과 버전은
-[workers/README.md](./workers/README.md)에 정리되어 있습니다. 각 환경은 직접
-의존성을 `requirements.lock.txt`로 고정하고 설치 완료 후 모든 전이 의존성을
-`pip freeze` 파일로 기록합니다.
+직접 환경을 만들고 싶다면 아래와 동일합니다. 활성화는 선택 사항이며, 설치할 때
+가상환경의 Python을 명시하면 됩니다.
 
-그다음 `setup-windows.ps1`이 [config.example.yml](./config.example.yml)을 복사해
-만든 로컬 `config.yml`에서 OCR profile과 semantic 단계용 endpoint를 설정합니다.
+```console
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -e ".[api,windows]"
+```
+
+macOS/Linux에서는 마지막 명령의 인터프리터 경로만
+`.venv/bin/python`으로 바꿉니다.
+
+OCR 모델은 크고 런타임 의존성이 달라 메인 앱과 섞어 설치하지 않습니다. 이미지
+OCR이 필요 없으면 `config.yml`에서 `ocr.enabled: false`, `backend: none`을 사용하고,
+OpenAI-compatible VLM이 있으면 `backend: openai_vlm`으로 설정할 수 있습니다. 로컬
+GPU OCR worker를 사용할 때만 [workers/README.md](./workers/README.md)의 별도 설치
+절차가 필요합니다.
+
+`bootstrap.py`가 [config.example.yml](./config.example.yml)을 복사해 만든 로컬
+`config.yml`에서 OCR profile과 semantic 단계용 endpoint를 설정합니다.
 `config.yml`은 API key 보호를 위해 Git에서 제외됩니다. 로컬 OCR만 사용할 때
 `vlm_api`는 비워 두어도 됩니다.
 
@@ -145,32 +154,24 @@ wiki:
   enabled: true
 ```
 
-현재 PowerShell 세션에 semantic LLM key를 넣으려면:
-
-```powershell
-$env:PPTX_WIKI_API_KEY = "your-key"
-```
-
-Explorer에서 BAT 파일로 실행하려면 환경변수를 Windows 사용자 환경에 영구
-등록하거나, `config.yml`의 `api_key`에 직접 넣고 `api_key_env: ""`로 바꿉니다.
-후자는 평문 secret이므로 config를 공유하거나 커밋하면 안 됩니다.
+`api_key_env`를 사용한다면 VS Code 실행 환경이나 운영체제 사용자 환경에 해당
+변수를 등록합니다. 또는 `config.yml`의 `api_key`에 직접 넣고 `api_key_env: ""`로
+바꿀 수 있지만, 평문 secret이므로 config를 공유하거나 커밋하면 안 됩니다.
 
 이후 VS Code에서 이 폴더를 열고 터미널에서 실행합니다. `run.py`가 프로젝트의
 `.venv` Python을 자동으로 찾아 실행하므로 별도로 activate하지 않아도 됩니다.
 진행 로그와 최종 결과는 같은 터미널에 계속 출력됩니다.
 
-```powershell
-python .\run.py "D:\documents\source.pptx"
+```console
+python run.py "D:\documents\source.pptx"
 ```
 
 기본적으로 `run.py`와 같은 디렉터리의 고정된 `config.yml`을 읽으며, PPTX 옆이나
 현재 작업 디렉터리의 설정 파일을 자동으로 신뢰하지 않습니다. 다른 설정이나 출력
 경로를 명시하려면 다음처럼 실행합니다.
 
-```powershell
-python .\run.py "D:\documents\source.pptx" `
-  --config "D:\settings\pptx-wiki.yml" `
-  --output "D:\results\source-wiki"
+```console
+python run.py "D:\documents\source.pptx" --config "D:\settings\pptx-wiki.yml" --output "D:\results\source-wiki"
 ```
 
 Windows 기본 설정은 다음과 같습니다.
@@ -189,10 +190,8 @@ Windows 기본 설정은 다음과 같습니다.
 
 ## 설치
 
-```bash
-cd pptx-wiki
-python3 -m venv .venv
-.venv/bin/pip install -e '.[api]'
+```console
+python bootstrap.py
 ```
 
 PPTX를 직접 렌더링하려면 LibreOffice와 Poppler의 `pdftocairo`가 필요합니다.
@@ -201,10 +200,13 @@ Windows에서 글꼴과 배치 보존이 특히 중요하면 PowerPoint로 미�
 
 ## 단계별 실행
 
+아래 예시는 설치된 가상환경의 Python을 직접 사용하므로 activate가 필요 없습니다.
+macOS/Linux에서는 `.venv\Scripts\python.exe` 대신 `.venv/bin/python`을 사용합니다.
+
 ### 1. parsed — 원본 충실 추출
 
-```bash
-.venv/bin/pptx-wiki parse input.pptx -o output/my-deck
+```console
+.venv\Scripts\python.exe -m pptx_wiki.cli parse input.pptx -o output/my-deck
 ```
 
 텍스트박스, 네이티브 표, 병합 셀, 그룹 좌표, 발표자 노트가 추출됩니다.
@@ -213,15 +215,8 @@ GPU, LLM, 외부 API가 필요 없습니다.
 
 ### 2. semantic — 의미 기반 선택·재정리
 
-```bash
-export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
-export OPENAI_API_KEY=local-key
-export OPENAI_LLM_MODEL=my-llm
-
-.venv/bin/pptx-wiki organize output/my-deck/parsed \
-  -o output/my-deck/semantic \
-  --goal "핵심 업무 내용만 보존하고 작성 가이드와 무관한 예시는 제외합니다." \
-  --coverage-policy selected
+```console
+.venv\Scripts\python.exe -m pptx_wiki.cli organize output/my-deck/parsed -o output/my-deck/semantic --goal "핵심 업무 내용만 보존하고 작성 가이드와 무관한 예시는 제외합니다." --coverage-policy selected --llm-base-url http://127.0.0.1:8000/v1 --llm-model my-llm
 ```
 
 이 단계만 OpenAI-compatible 텍스트 LLM이 필요합니다. `selected` 정책에서는 목적과
@@ -233,10 +228,8 @@ API key가 필요 없는 로컬 서버라면 `OPENAI_API_KEY`를 설정하지 �
 
 ### 3. wiki — Markdown 게시
 
-```bash
-.venv/bin/pptx-wiki wiki output/my-deck/semantic \
-  --parsed output/my-deck/parsed \
-  -o output/my-deck/wiki
+```console
+.venv\Scripts\python.exe -m pptx_wiki.cli wiki output/my-deck/semantic --parsed output/my-deck/parsed -o output/my-deck/wiki
 ```
 
 이 단계는 LLM을 호출하지 않습니다. semantic 문서와 parsed provenance의 hash 및
@@ -244,12 +237,8 @@ citation을 검증한 다음 `index.md`, 주제별 Markdown, `publish-report.jso
 
 세 단계를 한 번에 실행하는 기존 단축 명령도 유지됩니다.
 
-```bash
-.venv/bin/pptx-wiki run input.pptx -o output/my-deck \
-  --synthesize \
-  --coverage-policy selected \
-  --llm-base-url http://127.0.0.1:8000/v1 \
-  --llm-model my-llm
+```console
+.venv\Scripts\python.exe -m pptx_wiki.cli run input.pptx -o output/my-deck --synthesize --coverage-policy selected --llm-base-url http://127.0.0.1:8000/v1 --llm-model my-llm
 ```
 
 시각 객체 OCR에 OpenAI-compatible VLM을 사용하려면 parse/run 명령에
@@ -295,10 +284,8 @@ ocr:
 목록은 worker 디렉터리에 setup이 남긴 `*.freeze.txt`에서 확인합니다. 다운로드만
 다시 검증하려면 해당 venv의 Python으로 실행합니다.
 
-```powershell
-.\workers\paddleocr_vl_16\.venv\Scripts\python.exe `
-  .\workers\paddleocr_vl_16\download.py `
-  --model-dir .\models\paddleocr_vl_16
+```console
+workers\paddleocr_vl_16\.venv\Scripts\python.exe workers\paddleocr_vl_16\download.py --model-dir models\paddleocr_vl_16
 ```
 
 worker 공통 결과 형식은 다음과 같습니다.
@@ -328,11 +315,8 @@ worker 공통 결과 형식은 다음과 같습니다.
 슬라이드 수와 이미지 수가 같아야 합니다. 파일명에 슬라이드 번호를 넣는 것을
 권장합니다.
 
-```bash
-.venv/bin/pptx-wiki run input.pptx -o output/my-deck \
-  --rendered-slides-dir ./rendered-300dpi \
-  --ocr openai_vlm \
-  --synthesize
+```console
+.venv\Scripts\python.exe -m pptx_wiki.cli run input.pptx -o output/my-deck --rendered-slides-dir rendered-300dpi --ocr openai_vlm --synthesize
 ```
 
 6–8pt 표가 많다면 300 DPI 또는 약 4000×2250 PNG에서 시작하고, 전체 슬라이드
@@ -369,9 +353,9 @@ semantic과 Wiki의 사실 문장은 `[slide-N#element-id]` 형식으로 원본 
 
 ## 테스트
 
-```bash
-.venv/bin/pip install -e '.[dev,api]'
-.venv/bin/pytest -q
+```console
+python bootstrap.py --dev
+.venv\Scripts\python.exe -m pytest -q
 ```
 
 테스트 fixture에는 한국어 텍스트박스 여러 개, 1pt 간격 표 두 개, 가로·세로

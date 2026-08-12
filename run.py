@@ -63,7 +63,7 @@ def _project_python() -> Path:
     if importlib.util.find_spec("pptx_wiki") is not None:
         return Path(sys.executable).resolve()
     raise FileNotFoundError(
-        "project Python environment was not found; run setup-windows.ps1 once "
+        "project Python environment was not found; run 'python bootstrap.py' once "
         "or select an interpreter where pptx-wiki is installed"
     )
 
