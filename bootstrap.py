@@ -22,7 +22,8 @@ MINIMUM_PYTHON = (3, 10)
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Create or reuse .venv, install pptx-wiki, and initialize config.yml."
+            "Create or reuse .venv, install pptx-wiki, and initialize the local "
+            "config/input/output workspace."
         )
     )
     parser.add_argument(
@@ -126,6 +127,19 @@ def _initialize_config() -> bool:
     return True
 
 
+def _initialize_io_directories() -> None:
+    """Create the local input/output directories without replacing user data."""
+
+    directories = (PROJECT_ROOT / "input", PROJECT_ROOT / "output")
+    for directory in directories:
+        if directory.exists() and not directory.is_dir():
+            raise RuntimeError(
+                f"workspace path exists but is not a directory: {directory}"
+            )
+    for directory in directories:
+        directory.mkdir(exist_ok=True)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -142,6 +156,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"{PROJECT_ROOT / 'config.yml'}",
                 flush=True,
             )
+        _initialize_io_directories()
+        print(f"Input directory ready : {PROJECT_ROOT / 'input'}", flush=True)
+        print(f"Output directory ready: {PROJECT_ROOT / 'output'}", flush=True)
     except subprocess.CalledProcessError as error:
         print(
             f"bootstrap failed: command exited with status {error.returncode}",
@@ -156,11 +173,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     print("Setup complete.", flush=True)
     print("1. Edit config.yml and set llm_api endpoint/model credentials.", flush=True)
     print(
-        "2. Run: python run.py raw.pptx --batch --output output/collection",
+        "2. Put .pptx files in input/.",
         flush=True,
     )
     print(
-        "3. If PR/request numbers exist only in images, configure an OCR/VL backend.",
+        "3. Run: python run.py",
+        flush=True,
+    )
+    print(
+        "4. PR/request numbers must be present in native text or tables while "
+        "image extraction is disabled.",
         flush=True,
     )
     return 0

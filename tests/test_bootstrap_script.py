@@ -42,12 +42,18 @@ def test_bootstrap_main_runs_default_install_and_initializes_config(
     monkeypatch.setattr(
         bootstrap, "_initialize_config", lambda: calls.append(("config",))
     )
+    monkeypatch.setattr(
+        bootstrap,
+        "_initialize_io_directories",
+        lambda: calls.append(("io-directories",)),
+    )
 
     assert bootstrap.main([]) == 0
     assert calls == [
         ("environment",),
         ("install", environment_python, False),
         ("config",),
+        ("io-directories",),
     ]
 
 
@@ -71,16 +77,22 @@ def test_bootstrap_main_honors_dev_and_skip_flags(
     monkeypatch.setattr(
         bootstrap, "_initialize_config", lambda: calls.append(("config",))
     )
+    monkeypatch.setattr(
+        bootstrap,
+        "_initialize_io_directories",
+        lambda: calls.append(("io-directories",)),
+    )
 
     assert bootstrap.main(["--dev", "--skip-config"]) == 0
     assert calls == [
         ("environment",),
         ("install", environment_python, True),
+        ("io-directories",),
     ]
 
     calls.clear()
     assert bootstrap.main(["--skip-install", "--skip-config"]) == 0
-    assert calls == [("environment",)]
+    assert calls == [("environment",), ("io-directories",)]
 
 
 def test_bootstrap_creates_project_environment(
@@ -220,6 +232,50 @@ def test_bootstrap_initializes_config_once_without_overwriting_user_changes(
     assert config.read_text(encoding="utf-8") == "version: 1\nmodel: private\n"
 
 
+def test_bootstrap_initializes_input_and_output_directories_idempotently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bootstrap = _load_bootstrap()
+    monkeypatch.setattr(bootstrap, "PROJECT_ROOT", tmp_path)
+
+    bootstrap._initialize_io_directories()
+
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    assert input_dir.is_dir()
+    assert output_dir.is_dir()
+
+    input_marker = input_dir / "existing.pptx"
+    output_marker = output_dir / "existing" / "result.md"
+    input_marker.write_bytes(b"existing input")
+    output_marker.parent.mkdir()
+    output_marker.write_text("existing output\n", encoding="utf-8")
+
+    bootstrap._initialize_io_directories()
+
+    assert input_marker.read_bytes() == b"existing input"
+    assert output_marker.read_text(encoding="utf-8") == "existing output\n"
+
+
+@pytest.mark.parametrize("conflicting_name", ("input", "output"))
+def test_bootstrap_rejects_workspace_directory_name_collisions_without_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    conflicting_name: str,
+) -> None:
+    bootstrap = _load_bootstrap()
+    monkeypatch.setattr(bootstrap, "PROJECT_ROOT", tmp_path)
+    conflict = tmp_path / conflicting_name
+    conflict.write_text("user data\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="not a directory"):
+        bootstrap._initialize_io_directories()
+
+    assert conflict.read_text(encoding="utf-8") == "user data\n"
+    other_name = "output" if conflicting_name == "input" else "input"
+    assert not (tmp_path / other_name).exists()
+
+
 def test_readme_documents_python_first_bootstrap_and_execution_flow() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
@@ -233,3 +289,7 @@ def test_readme_documents_python_first_bootstrap_and_execution_flow() -> None:
     assert run_positions, "README must show how to run the pipeline with Python"
     assert bootstrap_position < min(run_positions)
     assert "python bootstrap.py --dev" in readme
+    assert (
+        "python run.py input --batch --recursive --config config.yml --output output"
+        in readme
+    )

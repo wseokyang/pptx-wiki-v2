@@ -17,13 +17,28 @@ PR 번호는 선택 정보가 아닙니다. 프로그램이 parsed provenance의
 허용된 citation, 해당 citation에 명시된 PR, 숫자·식별자만 받아들입니다. 관계를
 만들 근거가 모호하면 임의 연결하지 않고 warning으로 남깁니다.
 
-최초 한 번 Python 부트스트랩을 실행한 뒤 `config.yml`을 편집합니다. 가상환경을
-activate할 필요는 없습니다. `run.py`가 프로젝트의 `.venv` Python을 자동으로
-사용합니다.
+최초 한 번 Python 부트스트랩을 실행하면 프로젝트 루트에 `input/`과 `output/`도
+생성됩니다. `config.yml`을 편집하고 `input/`에 처리할 PPTX 파일들을 넣으세요.
+가상환경을 activate할 필요는 없습니다. `run.py`가 프로젝트의 `.venv` Python과
+두 표준 폴더를 자동으로 사용합니다.
 
 ```console
 python bootstrap.py
-python run.py "D:\reliability\incoming" --batch --recursive --config config.yml --output "D:\reliability\wiki-build"
+python run.py
+```
+
+`python run.py`는 `input/` 바로 아래의 모든 `.pptx`를 한 collection으로 처리해
+`output/`에 세 단계 산출물과 Quartz 콘텐츠를 만듭니다. `input/`의 하위 폴더도
+검색하려면 다음처럼 실행합니다.
+
+```console
+python run.py --recursive
+```
+
+같은 동작을 모든 인자와 함께 명시하면 다음과 같습니다.
+
+```console
+python run.py input --batch --recursive --config config.yml --output output
 ```
 
 파일을 직접 여러 개 지정해도 됩니다.
@@ -131,7 +146,20 @@ python bootstrap.py
 - 프로젝트 전용 `.venv`를 생성하거나 기존의 정상적인 `.venv`를 재사용
 - `.venv`에 `pptx-wiki`와 API/Windows 의존성을 editable 모드로 설치
 - `config.yml`이 없을 때만 `config.example.yml`을 복사
-- 기존 `.venv`나 `config.yml`이 비정상이면 덮어쓰거나 삭제하지 않고 중단
+- 프로젝트 루트의 `input/`과 `output/`을 없을 때만 생성
+- 기존 `.venv`, `config.yml`, 입력 파일, 출력 결과는 덮어쓰거나 삭제하지 않음
+
+기본 실행은 아래 두 줄이면 충분합니다.
+
+```console
+python bootstrap.py
+python run.py
+```
+
+완료된 `output/`은 다음 실행에서 자동으로 덮어쓰지 않습니다. 기존 결과를 보존한
+채 다시 처리하려면 `--output output/run-002`처럼 새롭고 비어 있는 출력 경로를
+지정하세요. `input/`과 `output/`은 사용자 문서 보호를 위해 Git 추적에서도
+제외됩니다.
 
 개발·테스트 의존성까지 설치하려면 다음을 사용합니다.
 

@@ -20,9 +20,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "input",
-        nargs="+",
+        nargs="*",
         type=Path,
-        help="one or more input .pptx files, or directories in --batch mode",
+        help=(
+            "one or more input .pptx files, or directories in --batch mode; "
+            "defaults to the project input/ directory"
+        ),
     )
     parser.add_argument(
         "--config",
@@ -125,9 +128,18 @@ def _quartz_command(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
-    input_paths = tuple(_absolute(value) for value in args.input)
+    explicit_inputs = bool(args.input)
+    if args.resume_quartz and not explicit_inputs:
+        parser.error("--resume-quartz requires an explicit collection directory")
+    input_values = args.input if explicit_inputs else (PROJECT_ROOT / "input",)
+    input_paths = tuple(_absolute(value) for value in input_values)
     config_path = _absolute(args.config)
-    output_path = _absolute(args.output) if args.output is not None else None
+    if args.output is not None:
+        output_path = _absolute(args.output)
+    elif not explicit_inputs:
+        output_path = _absolute(PROJECT_ROOT / "output")
+    else:
+        output_path = None
     if args.resume_quartz:
         if len(input_paths) != 1 or not input_paths[0].is_dir():
             parser.error("--resume-quartz requires exactly one existing collection directory")
@@ -144,7 +156,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("-" * 72, flush=True)
         return _run_command(command)
 
-    batch = bool(args.batch or len(input_paths) > 1 or any(path.is_dir() for path in input_paths))
+    batch = bool(
+        args.batch
+        or not explicit_inputs
+        or len(input_paths) > 1
+        or any(path.is_dir() for path in input_paths)
+    )
 
     for input_path in input_paths:
         if not input_path.exists():
@@ -175,6 +192,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(f"Input  : {', '.join(str(path) for path in input_paths)}", flush=True)
     print(f"Config : {config_path}", flush=True)
+    if output_path is not None:
+        print(f"Output : {output_path}", flush=True)
     print(f"Python : {command[0]}", flush=True)
     print("-" * 72, flush=True)
 
